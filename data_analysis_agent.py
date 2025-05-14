@@ -20,6 +20,9 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
+import logging
+import sys
+from contextlib import redirect_stdout, redirect_stderr
 
 
 # Load environment variables from .env file
@@ -29,6 +32,42 @@ load_dotenv()
 api_key = os.environ.get("NVIDIA_API_KEY")
 api_url = os.environ.get("API_URL")
 
+# Configure logging with colored log levels
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+# ANSI color codes for log levels
+LOG_COLORS = {
+    'DEBUG': '\033[36m',    # Cyan
+    'INFO': '\033[32m',     # Green
+    'WARNING': '\033[33m',  # Yellow
+    'ERROR': '\033[31m',    # Red
+    'CRITICAL': '\033[35m', # Magenta
+    'RESET': '\033[0m',     # Reset to default
+}
+
+# Custom formatter that adds color only to the log level
+class ColoredLevelFormatter(logging.Formatter):
+    def format(self, record):
+        levelname = record.levelname
+        if levelname in LOG_COLORS:
+            colored_levelname = f"{LOG_COLORS[levelname]}{levelname}{LOG_COLORS['RESET']}"
+            record.levelname = colored_levelname
+        return super().format(record)
+
+# Configure logging with the custom formatter
+formatter = ColoredLevelFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+
+# Set up root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+# Remove existing handlers to avoid duplicates
+for hdlr in root_logger.handlers[:]:
+    root_logger.removeHandler(hdlr)
+root_logger.addHandler(handler)
+
+logger = logging.getLogger(__name__)
 
 client = OpenAI(
   base_url = api_url,
@@ -44,6 +83,7 @@ def QueryUnderstandingTool(query: str) -> bool:
         {"role": "user", "content": query}
     ]
     
+    logger.debug(f"Calling QueryUnderstandingTool API with query: {query}")
     response = client.chat.completions.create(
         model="nvidia/llama-3.3-nemotron-super-49b-v1",
         messages=messages,
@@ -53,6 +93,7 @@ def QueryUnderstandingTool(query: str) -> bool:
     
     # Extract the response and convert to boolean
     intent_response = response.choices[0].message.content.strip().lower()
+    logger.info(f"Query understanding result: {intent_response} for query: {query}")
     return intent_response == "true"
 
 # === CodeGeneration TOOLS ============================================
@@ -60,6 +101,7 @@ def QueryUnderstandingTool(query: str) -> bool:
 # ------------------  PlotCodeGeneratorTool ---------------------------
 def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas+matplotlib code for a plot based on the query and columns."""
+    logger.debug(f"Generating plot code prompt for query: {query}")
     return f"""
     Given DataFrame `df` with columns: {', '.join(cols)}
     Write Python code using pandas **and matplotlib** (as plt) to answer:
@@ -76,6 +118,7 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
 # ------------------  CodeWritingTool ---------------------------------
 def CodeWritingTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas-only code for a data query (no plotting)."""
+    logger.debug(f"Generating data analysis code prompt for query: {query}")
     return f"""
     Given DataFrame `df` with columns: {', '.join(cols)}
     Write Python code (pandas **only**, no plotting) to answer:
@@ -92,6 +135,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
 
 def CodeGenerationAgent(query: str, df: pd.DataFrame):
     """Selects the appropriate code generation tool and gets code from the LLM for the user's query."""
+    logger.info(f"CodeGenerationAgent processing query: {query}")
     should_plot = QueryUnderstandingTool(query)
     prompt = PlotCodeGeneratorTool(df.columns.tolist(), query) if should_plot else CodeWritingTool(df.columns.tolist(), query)
 
@@ -100,6 +144,7 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame):
         {"role": "user", "content": prompt}
     ]
 
+    logger.debug(f"Calling code generation API with prompt length: {len(prompt)}")
     response = client.chat.completions.create(
         model="nvidia/llama-3.3-nemotron-super-49b-v1",
         messages=messages,
@@ -109,26 +154,57 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame):
 
     full_response = response.choices[0].message.content
     code = extract_first_code_block(full_response)
+    logger.debug(f"Generated code length: {len(code)}")
     return code, should_plot, ""
 
 # === ExecutionAgent ====================================================
 
 def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
     """Executes the generated code in a controlled environment and returns the result or error message."""
+    logger.info("Executing generated code")
+    logger.debug(f"Code to execute:\n{code}")
+    
     env = {"pd": pd, "df": df}
     if should_plot:
         plt.rcParams["figure.dpi"] = 100  # Set default DPI for all figures
         env["plt"] = plt
         env["io"] = io
+    
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    
     try:
-        exec(code, {}, env)
-        return env.get("result", None)
+        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            exec(code, {}, env)
+        
+        stdout_content = stdout_capture.getvalue()
+        stderr_content = stderr_capture.getvalue()
+        
+        if stdout_content:
+            logger.debug(f"Code execution stdout:\n{stdout_content}")
+        if stderr_content:
+            logger.debug(f"Code execution stderr:\n{stderr_content}")
+            
+        result = env.get("result", None)
+        return result
     except Exception as exc:
-        return f"Error executing code: {exc}"
+        error_msg = f"Error executing code: {exc}"
+        logger.error(error_msg)
+        
+        stdout_content = stdout_capture.getvalue()
+        stderr_content = stderr_capture.getvalue()
+        
+        if stdout_content:
+            logger.debug(f"Code execution stdout before error:\n{stdout_content}")
+        if stderr_content:
+            logger.debug(f"Code execution stderr before error:\n{stderr_content}")
+            
+        return error_msg
 
 # === ReasoningCurator TOOL =========================================
 def ReasoningCurator(query: str, result: Any) -> str:
     """Builds and returns the LLM prompt for reasoning about the result."""
+    logger.debug("Building reasoning prompt")
     is_error = isinstance(result, str) and result.startswith("Error executing code")
     is_plot = isinstance(result, (plt.Figure, plt.Axes))
 
@@ -160,6 +236,7 @@ def ReasoningCurator(query: str, result: Any) -> str:
 # === ReasoningAgent (streaming) =========================================
 def ReasoningAgent(query: str, result: Any):
     """Streams the LLM's reasoning about the result (plot or value) and extracts model 'thinking' and final explanation."""
+    logger.info("Generating reasoning about results")
     prompt = ReasoningCurator(query, result)
     is_error = isinstance(result, str) and result.startswith("Error executing code")
     is_plot = isinstance(result, (plt.Figure, plt.Axes))
@@ -169,6 +246,7 @@ def ReasoningAgent(query: str, result: Any):
     system_content = "detailed thinking on. You are an insightful data analyst." if reasoning_enabled else "detailed thinking off. You are an insightful data analyst."
 
     # Streaming LLM call
+    logger.debug("Starting streaming reasoning API call")
     response = client.chat.completions.create(
         model="nvidia/llama-3.3-nemotron-super-49b-v1",
         messages=[
@@ -205,6 +283,7 @@ def ReasoningAgent(query: str, result: Any):
                     unsafe_allow_html=True
                 )
 
+    logger.debug(f"Completed streaming response, thinking content length: {len(thinking_content)}")
     # After streaming, extract final reasoning (outside <think>...</think>)
     cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
     return thinking_content, cleaned
@@ -212,6 +291,7 @@ def ReasoningAgent(query: str, result: Any):
 # === DataFrameSummary TOOL (pandas only) =========================================
 def DataFrameSummaryTool(df: pd.DataFrame) -> str:
     """Generate a summary prompt string for the LLM based on the DataFrame."""
+    logger.debug(f"Generating DataFrame summary for shape: {df.shape}")
     prompt = f"""
         Given a dataset with {len(df)} rows and {len(df.columns)} columns:
         Columns: {', '.join(df.columns)}
@@ -228,8 +308,10 @@ def DataFrameSummaryTool(df: pd.DataFrame) -> str:
 
 def DataInsightAgent(df: pd.DataFrame) -> str:
     """Uses the LLM to generate a brief summary and possible questions for the uploaded dataset."""
+    logger.info(f"Generating dataset insights for DataFrame with shape: {df.shape}")
     prompt = DataFrameSummaryTool(df)
     try:
+        logger.debug("Calling data insight API")
         response = client.chat.completions.create(
             model="nvidia/llama-3.3-nemotron-super-49b-v1",
             messages=[
@@ -241,7 +323,9 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
         )
         return response.choices[0].message.content
     except Exception as exc:
-        return f"Error generating dataset insights: {exc}"
+        error_msg = f"Error generating dataset insights: {exc}"
+        logger.error(error_msg)
+        return error_msg
 
 # === Helpers ===========================================================
 
@@ -259,6 +343,7 @@ def extract_first_code_block(text: str) -> str:
 # === Main Streamlit App ===============================================
 
 def main():
+    logger.info("Starting Data Analysis Agent application")
     st.set_page_config(layout="wide")
     if "plots" not in st.session_state:
         st.session_state.plots = []
@@ -278,6 +363,7 @@ def main():
         file = st.file_uploader("Choose CSV", type=["csv"])
         if file:
             if ("df" not in st.session_state) or (st.session_state.get("current_file") != file.name):
+                logger.info(f"Loading new file: {file.name}")
                 st.session_state.df = pd.read_csv(file)
                 st.session_state.current_file = file.name
                 st.session_state.messages = []
@@ -307,6 +393,7 @@ def main():
 
         if file:  # only allow chat after upload
             if user_q := st.chat_input("Ask about your data…"):
+                logger.info(f"Received user query: {user_q}")
                 st.session_state.messages.append({"role": "user", "content": user_q})
                 with st.spinner("Working …"):
                     code, should_plot_flag, code_thinking = CodeGenerationAgent(user_q, st.session_state.df)
@@ -318,6 +405,7 @@ def main():
                 is_plot = isinstance(result_obj, (plt.Figure, plt.Axes))
                 plot_idx = None
                 if is_plot:
+                    logger.debug("Storing generated plot")
                     fig = result_obj.figure if isinstance(result_obj, plt.Axes) else result_obj
                     st.session_state.plots.append(fig)
                     plot_idx = len(st.session_state.plots) - 1
@@ -352,6 +440,7 @@ def main():
                 # Combine thinking, explanation, and code accordion
                 assistant_msg = f"{thinking_html}{explanation_html}\n\n{code_html}"
 
+                logger.debug("Adding assistant response to session state")
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": assistant_msg,
