@@ -56,7 +56,7 @@ class ColoredLevelFormatter(logging.Formatter):
         return super().format(record)
 
 # Configure logging with the custom formatter
-formatter = ColoredLevelFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = ColoredLevelFormatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s')
 handler = logging.StreamHandler()
 handler.setFormatter(formatter)
 
@@ -86,7 +86,8 @@ def call_llm_api(
     temperature: float = 0.2, 
     max_tokens: int = 4096, 
     thinking_placeholder: Optional[Any] = None,
-    model: str = "nvidia/llama-3.3-nemotron-super-49b-v1"
+    model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
+    thinking_title: str = "Model Thinking"
 ) -> Union[str, Tuple[str, str]]:
     """
     Unified function to call the LLM API with consistent handling of streaming and thinking tags.
@@ -99,6 +100,7 @@ def call_llm_api(
         max_tokens: Maximum tokens to generate
         thinking_placeholder: Streamlit placeholder for displaying thinking (only used if stream=True)
         model: Model to use for inference
+        thinking_title: Title to display in the thinking section
         
     Returns:
         If stream=False: Just the response content with thinking tags removed
@@ -175,7 +177,7 @@ def call_llm_api(
                         thinking_content += token
                         if thinking_placeholder:
                             thinking_placeholder.markdown(
-                                f'<details class="thinking" open><summary>🤔 Model Thinking</summary><pre>{thinking_content}</pre></details>',
+                                f'<details class="thinking" open><summary>🤔 {thinking_title}</summary><pre>{thinking_content}</pre></details>',
                                 unsafe_allow_html=True
                             )
             
@@ -286,7 +288,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
 
 # === CodeGenerationAgent ==============================================
 
-def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
+def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thinking_placeholder: Optional[Any] = None):
     """Selects the appropriate code generation tool and gets code from the LLM for the user's query."""
     logger.info(f"CodeGenerationAgent processing query: {query}")
     should_plot = QueryUnderstandingTool(query)
@@ -300,6 +302,7 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
     
     code = ""
     error_msg = ""
+    thinking_content = ""
     retries = 0
     
     base_prompt = "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment."
@@ -324,13 +327,22 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
             """
             logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
         
-        result = call_llm_api(
+        # Create a placeholder for thinking output
+        current_thinking_placeholder = thinking_placeholder or st.empty()
+        
+        # Use streaming API call to show thinking in real-time
+        current_thinking, result = call_llm_api(
             prompt=retry_prompt,
             system_content=system_content,
-            stream=False,
+            stream=True,
             temperature=0.2,
-            max_tokens=8192
+            max_tokens=8192,
+            thinking_placeholder=current_thinking_placeholder,
+            thinking_title="Code Generation Thinking"
         )
+        
+        # Save the thinking content
+        thinking_content = current_thinking
 
         code = extract_first_code_block(result)
         logger.debug(f"Generated code: {code}")
@@ -346,13 +358,13 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
                 continue
             else:
                 # Code executed successfully
-                return code, should_plot, error_msg
+                return code, should_plot, error_msg, thinking_content
         
         retries += 1
     
     # If we've reached max retries and still have errors, return the last code anyway
     logger.warning(f"Reached maximum retries ({max_retries}) with errors, returning last generated code")
-    return code, should_plot, error_msg
+    return code, should_plot, error_msg, thinking_content
 
 # === ExecutionAgent ====================================================
 
@@ -398,7 +410,7 @@ def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
         return error_msg
 
 # === ReasoningCurator TOOL =========================================
-def ReasoningCurator(query: str, result: Any) -> str:
+def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
     """Builds and returns the LLM prompt for reasoning about the result."""
     logger.debug("Building reasoning prompt")
     is_error = isinstance(result, str) and result.startswith("Error executing code")
@@ -549,22 +561,30 @@ def ReasoningCurator(query: str, result: Any) -> str:
     if is_plot:
         prompt = f'''
         The user asked: "{query}".
+        The code used to generate the result:
+        ```python
+        {code}
+        ```
         Below is a description of the plot result:
         {desc}
         Explain in 2–3 concise sentences what the chart shows and its key insights.'''
     else:
         prompt = f'''
         The user asked: "{query}".
+        The code used to generate the result:
+        ```python
+        {code}
+        ```
         The result is:
         {desc}
         Explain in 2–3 concise sentences what this tells about the data.'''
     return prompt
 
 # === ReasoningAgent (streaming) =========================================
-def ReasoningAgent(query: str, result: Any):
+def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder: Optional[Any] = None):
     """Streams the LLM's reasoning about the result (plot or value) and extracts model 'thinking' and final explanation."""
     logger.info("Generating reasoning about results")
-    prompt = ReasoningCurator(query, result)
+    prompt = ReasoningCurator(query, result, code)
     logger.info(f"Reasoning prompt: {prompt}")
 
     # Get the system prompt with reasoning status
@@ -572,7 +592,7 @@ def ReasoningAgent(query: str, result: Any):
     system_content = get_system_prompt(base_prompt)
 
     # Use the unified API calling function with streaming
-    thinking_placeholder = st.empty()
+    thinking_placeholder = thinking_placeholder or st.empty()
     
     thinking_content, cleaned = call_llm_api(
         prompt=prompt,
@@ -580,7 +600,8 @@ def ReasoningAgent(query: str, result: Any):
         stream=True,
         temperature=0.2,
         max_tokens=8192,
-        thinking_placeholder=thinking_placeholder
+        thinking_placeholder=thinking_placeholder,
+        thinking_title="Result Analysis Thinking"
     )
     
     logger.info(f"Completed streaming response, thinking content length: {len(thinking_content)}")
@@ -619,7 +640,7 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
         system_content=system_content,
         stream=False,
         temperature=0.2,
-        max_tokens=512
+        max_tokens=8192
     )
 
 # === Main Streamlit App ===============================================
@@ -629,6 +650,63 @@ def main():
     st.set_page_config(layout="wide")
     if "reasoning_enabled" not in st.session_state:
         st.session_state.reasoning_enabled = True  # Default to enabled
+
+    # Add CSS for thinking and code sections
+    st.markdown("""
+    <style>
+    details.thinking {
+        background-color: #f0f2f6;
+        padding: 12px;
+        border-radius: 8px;
+        margin: 12px 0;
+        border-left: 5px solid #9e9ac8;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+    details.thinking summary {
+        cursor: pointer;
+        font-weight: bold;
+        color: #555;
+        margin-bottom: 8px;
+    }
+    details.thinking pre {
+        white-space: pre-wrap;
+        margin-top: 8px;
+        font-size: 0.9em;
+        line-height: 1.4;
+        background-color: #ffffff;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #e6e6e6;
+    }
+    details.code {
+        background-color: #f6f6f6;
+        padding: 12px;
+        border-radius: 8px;
+        margin-top: 15px;
+        border-left: 5px solid #4a90e2;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+    details.code summary {
+        cursor: pointer;
+        font-weight: bold;
+        color: #333;
+        margin-bottom: 8px;
+    }
+    details.code pre {
+        background-color: #ffffff;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #e6e6e6;
+    }
+    .thinking-container {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 15px 0;
+        background-color: #f9f9f9;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     left, right = st.columns([3,7])
 
@@ -673,10 +751,31 @@ def main():
             if user_q := st.chat_input("Ask about your data…"):
                 logger.info(f"Received user query: {user_q}")
                 st.session_state.messages.append({"role": "user", "content": user_q})
+                
+                # Create containers for thinking output that won't be overwritten
+                thinking_container = st.container()
+                with thinking_container:
+                    st.markdown("#### Model Thinking Process")
+                    code_thinking_placeholder = st.empty()
+                    st.markdown("---")  # Separator between thinking blocks
+                    reasoning_thinking_placeholder = st.empty()
+                
                 with st.spinner("Working …"):
-                    code, should_plot_flag, code_thinking = CodeGenerationAgent(user_q, st.session_state.df)
+                    # Pass the code thinking placeholder to CodeGenerationAgent
+                    code, should_plot_flag, error_msg, thinking_content = CodeGenerationAgent(
+                        user_q, 
+                        st.session_state.df,
+                        thinking_placeholder=code_thinking_placeholder
+                    )
                     result_obj = ExecutionAgent(code, st.session_state.df, should_plot_flag)
-                    raw_thinking, reasoning_txt = ReasoningAgent(user_q, result_obj)
+                    
+                    # Pass the reasoning thinking placeholder to ReasoningAgent
+                    raw_thinking, reasoning_txt = ReasoningAgent(
+                        user_q, 
+                        result_obj, 
+                        code,
+                        thinking_placeholder=reasoning_thinking_placeholder
+                    )
                     reasoning_txt = reasoning_txt.replace("`", "")
 
                 # Build assistant response
@@ -691,12 +790,22 @@ def main():
                 else:
                     header = f"Result: {result_obj}"
 
-                # Show only reasoning thinking in Model Thinking (collapsed by default)
-                thinking_html = ""
-                if raw_thinking:
-                    thinking_html = (
+                # Show code generation thinking in Model Thinking section
+                code_thinking_html = ""
+                if thinking_content:
+                    code_thinking_html = (
                         '<details class="thinking">'
-                        '<summary>🧠 Reasoning</summary>'
+                        '<summary>🧮 Code Generation Process</summary>'
+                        f'<pre>{thinking_content}</pre>'
+                        '</details>'
+                    )
+
+                # Show reasoning thinking in Model Thinking section
+                reasoning_thinking_html = ""
+                if raw_thinking:
+                    reasoning_thinking_html = (
+                        '<details class="thinking">'
+                        '<summary>🧠 Result Analysis Process</summary>'
                         f'<pre>{raw_thinking}</pre>'
                         '</details>'
                     )
@@ -705,7 +814,7 @@ def main():
                 explanation_html = reasoning_txt
 
                 # Add retry information if there were retries
-                if code_thinking:
+                if error_msg:
                     explanation_html += f"\n\n<small><em>Note: Some code errors were fixed during generation.</em></small>"
 
                 # Code accordion with proper HTML <pre><code> syntax highlighting
@@ -717,7 +826,12 @@ def main():
                     '</code></pre>'
                     '</details>'
                 )
-                # Combine thinking, explanation, and code accordion
+                
+                # Combine thinking sections first, then explanation and code accordion
+                thinking_html = ""
+                if code_thinking_html or reasoning_thinking_html:
+                    thinking_html = f"{code_thinking_html}{reasoning_thinking_html}"
+                
                 assistant_msg = f"{thinking_html}{explanation_html}\n\n{code_html}"
 
                 logger.debug("Adding assistant response to session state")
