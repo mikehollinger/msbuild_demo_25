@@ -84,7 +84,7 @@ def call_llm_api(
     system_content: str = "detailed thinking off.", 
     stream: bool = False, 
     temperature: float = 0.2, 
-    max_tokens: int = 1024, 
+    max_tokens: int = 4096, 
     thinking_placeholder: Optional[Any] = None,
     model: str = "nvidia/llama-3.3-nemotron-super-49b-v1"
 ) -> Union[str, Tuple[str, str]]:
@@ -101,7 +101,7 @@ def call_llm_api(
         model: Model to use for inference
         
     Returns:
-        If stream=False: Just the response content
+        If stream=False: Just the response content with thinking tags removed
         If stream=True: A tuple of (thinking_content, final_response)
     """
     logger.debug(f"Calling LLM API with prompt: {prompt}")
@@ -122,7 +122,24 @@ def call_llm_api(
             )
             result = response.choices[0].message.content
             logger.debug(f"API non-streaming response: {result}")
-            return result
+            
+            # Extract thinking from non-streaming response too
+            thinking_content = ""
+            cleaned_response = result
+            
+            # Extract thinking tags and clean response
+            if "<think>" in result:
+                # Extract content inside thinking tags
+                thinking_match = re.search(r"<think>(.*?)</think>", result, re.DOTALL)
+                if thinking_match:
+                    thinking_content = thinking_match.group(1).strip()
+                    
+                # Remove thinking tags and their contents
+                cleaned_response = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+                logger.debug(f"Extracted thinking content: {thinking_content[:100]}...")
+            
+            # Return only the cleaned response without thinking tags
+            return cleaned_response
         except Exception as exc:
             error_msg = f"Error calling LLM API: {exc}"
             logger.error(error_msg)
@@ -172,11 +189,45 @@ def call_llm_api(
             logger.error(error_msg)
             return "", error_msg
 
+# === Helpers ===========================================================
+
+def extract_first_code_block(text: str) -> str:
+    """Extracts the first Python code block from a markdown-formatted string."""
+    # First, remove any thinking tags and their content
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    
+    # Then extract code block
+    start = text.find("```python")
+    if start == -1:
+        # Try without python specification (just ```)
+        start = text.find("```")
+        if start == -1:
+            return ""
+        start += len("```")
+    else:
+        start += len("```python")
+    
+    end = text.find("```", start)
+    if end == -1:
+        return ""
+        
+    return text[start:end].strip()
+
+def get_system_prompt(base_prompt: str) -> str:
+    """Builds a system prompt with reasoning enabled/disabled based on session state."""
+    reasoning_enabled = st.session_state.get("reasoning_enabled", True)
+    reasoning_prefix = "detailed thinking on." if reasoning_enabled else "detailed thinking off."
+    return f"{reasoning_prefix} {base_prompt}"
+
+# === CodeGeneration TOOLS ============================================
+
 # ------------------  QueryUnderstandingTool ---------------------------
 def QueryUnderstandingTool(query: str) -> bool:
     """Return True if the query seems to request a visualisation based on keywords."""
     # Use LLM to understand intent instead of keyword matching
-    system_content = "detailed thinking off. You are an assistant that determines if a query is requesting a data visualization. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
+    base_prompt = "You are an assistant that determines if a query is requesting a data visualization. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
+    system_content = get_system_prompt(base_prompt)
+    
     prompt = query
     
     logger.debug(f"Calling QueryUnderstandingTool with query: {query}")
@@ -190,11 +241,12 @@ def QueryUnderstandingTool(query: str) -> bool:
     )
     
     # Extract the response and convert to boolean
+    # Strip any whitespace and convert to lowercase for comparison
     intent_response = result.strip().lower()
     logger.info(f"Query understanding result: {intent_response} for query: {query}")
-    return intent_response == "true"
-
-# === CodeGeneration TOOLS ============================================
+    
+    # Check if the response contains "true" anywhere (handles partial responses)
+    return "true" in intent_response
 
 # ------------------  PlotCodeGeneratorTool ---------------------------
 def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
@@ -238,13 +290,20 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
     """Selects the appropriate code generation tool and gets code from the LLM for the user's query."""
     logger.info(f"CodeGenerationAgent processing query: {query}")
     should_plot = QueryUnderstandingTool(query)
+    
+    # If the query starts with "plot" or contains visualization keywords, force plot mode
+    if query.lower().startswith("plot") or "visualize" in query.lower() or "chart" in query.lower() or "graph" in query.lower():
+        should_plot = True
+        logger.info(f"Forcing plot mode based on query keywords")
+        
     prompt = PlotCodeGeneratorTool(df.columns.tolist(), query) if should_plot else CodeWritingTool(df.columns.tolist(), query)
     
     code = ""
     error_msg = ""
     retries = 0
     
-    system_content = "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment."
+    base_prompt = "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment."
+    system_content = get_system_prompt(base_prompt)
     
     while retries <= max_retries:
         # If this is a retry, include the error message in the prompt
@@ -265,7 +324,7 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
             system_content=system_content,
             stream=False,
             temperature=0.2,
-            max_tokens=1024
+            max_tokens=8192
         )
 
         code = extract_first_code_block(result)
@@ -503,9 +562,9 @@ def ReasoningAgent(query: str, result: Any):
     prompt = ReasoningCurator(query, result)
     logger.info(f"Reasoning prompt: {prompt}")
 
-    # Get the current reasoning state
-    reasoning_enabled = st.session_state.get("reasoning_enabled", True)
-    system_content = "detailed thinking on. You are an insightful data analyst." if reasoning_enabled else "detailed thinking off. You are an insightful data analyst."
+    # Get the system prompt with reasoning status
+    base_prompt = "You are an insightful data analyst."
+    system_content = get_system_prompt(base_prompt)
 
     # Use the unified API calling function with streaming
     thinking_placeholder = st.empty()
@@ -515,7 +574,7 @@ def ReasoningAgent(query: str, result: Any):
         system_content=system_content,
         stream=True,
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=8192,
         thinking_placeholder=thinking_placeholder
     )
     
@@ -547,7 +606,8 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
     logger.info(f"Generating dataset insights for DataFrame with shape: {df.shape}")
     prompt = DataFrameSummaryTool(df)
     
-    system_content = "detailed thinking off. You are a data analyst providing brief, focused insights."
+    base_prompt = "You are a data analyst providing brief, focused insights."
+    system_content = get_system_prompt(base_prompt)
     
     return call_llm_api(
         prompt=prompt,
@@ -556,19 +616,6 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
         temperature=0.2,
         max_tokens=512
     )
-
-# === Helpers ===========================================================
-
-def extract_first_code_block(text: str) -> str:
-    """Extracts the first Python code block from a markdown-formatted string."""
-    start = text.find("```python")
-    if start == -1:
-        return ""
-    start += len("```python")
-    end = text.find("```", start)
-    if end == -1:
-        return ""
-    return text[start:end].strip()
 
 # === Main Streamlit App ===============================================
 
