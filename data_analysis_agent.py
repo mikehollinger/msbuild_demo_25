@@ -343,26 +343,126 @@ def ReasoningCurator(query: str, result: Any) -> str:
     if is_error:
         desc = result
     elif is_plot:
+        # Extract title and numerical data summary from the plot
         title = ""
+        data_summary = ""
+        
         if isinstance(result, plt.Figure):
             title = result._suptitle.get_text() if result._suptitle else ""
+            # Extract data from the axes
+            axes = result.get_axes()
+            if axes:
+                # Get data from first axis
+                ax = axes[0]
+                
+                # Get axis labels
+                x_label = ax.get_xlabel()
+                y_label = ax.get_ylabel()
+                
+                # Try to extract data with category labels
+                if hasattr(ax, 'containers') and ax.containers:
+                    # For bar charts
+                    container_data = []
+                    if ax.containers and len(ax.containers) > 0:
+                        # Get x-ticks which often correspond to categories
+                        x_ticks = ax.get_xticks()
+                        tick_labels = [str(label) for label in ax.get_xticklabels()]
+                        
+                        # Extract text representations from tick labels
+                        if tick_labels and all(label.get_text() for label in ax.get_xticklabels()):
+                            tick_labels = [label.get_text() for label in ax.get_xticklabels()]
+                        
+                        # Match bars with their categories
+                        if len(tick_labels) > 0 and len(tick_labels) == len(x_ticks):
+                            bar_heights = [p.get_height() for p in ax.patches] if hasattr(ax, 'patches') and ax.patches else []
+                            
+                            # Create category-value pairs
+                            if bar_heights and len(bar_heights) == len(tick_labels):
+                                pairs = [f"{label}: {height}" for label, height in zip(tick_labels, bar_heights)]
+                                data_summary = f"Data: {', '.join(pairs)}"
+                            else:
+                                # Fallback if exact matching failed
+                                container = ax.containers[0]
+                                if hasattr(container, 'datavalues'):
+                                    values = container.datavalues
+                                    if len(values) <= len(tick_labels):
+                                        pairs = [f"{label}: {val}" for label, val in zip(tick_labels[:len(values)], values)]
+                                        data_summary = f"Data: {', '.join(pairs)}"
+                
+                # Try to get x and y data for line plots
+                if not data_summary and hasattr(ax, 'lines') and ax.lines:
+                    line = ax.lines[0]
+                    x_data = line.get_xdata()[:5]
+                    y_data = line.get_ydata()[:5]
+                    
+                    # Try to get legend labels
+                    legend_labels = []
+                    if ax.get_legend():
+                        legend_labels = [text.get_text() for text in ax.get_legend().get_texts()]
+                    
+                    if legend_labels:
+                        data_summary = f"Series: {legend_labels[0] if legend_labels else ''}, Points: {list(zip(x_data, y_data))}"
+                    else:
+                        data_summary = f"X values: {x_data}, Y values: {y_data}"
+                
+                if x_label or y_label:
+                    data_summary += f"\nAxes: {x_label or 'x'} vs {y_label or 'y'}"
+        
         elif isinstance(result, plt.Axes):
             title = result.get_title()
-        desc = f"[Plot Object: {title or 'Chart'}]"
+            # Apply similar extraction logic here
+            # Simplified for brevity
+            
+        desc = f"[Plot: {title or 'Chart'}]\n{data_summary}"
+    elif isinstance(result, pd.DataFrame):
+        # For DataFrame results, include shape and sample data
+        row_count = len(result)
+        col_count = len(result.columns)
+        
+        if row_count > 0:
+            # Include descriptive statistics if available
+            if all(pd.api.types.is_numeric_dtype(result[col]) for col in result.columns if col in result):
+                desc = f"DataFrame({row_count}×{col_count}):\nSummary statistics:\n{result.describe().to_string()}"
+            else:
+                # Include sample rows
+                sample_size = min(5, row_count)
+                desc = f"DataFrame({row_count}×{col_count}):\nSample rows:\n{result.head(sample_size).to_string()}"
+        else:
+            desc = f"Empty DataFrame with {col_count} columns"
+    elif isinstance(result, pd.Series):
+        # For Series results, include stats
+        if pd.api.types.is_numeric_dtype(result):
+            desc = f"Series({len(result)}):\n{result.describe().to_string()}"
+        else:
+            # For categorical series, show value counts
+            if hasattr(result, 'value_counts') and callable(getattr(result, 'value_counts')):
+                counts = result.value_counts()
+                if len(counts) <= 10:  # Show all if not too many categories
+                    desc = f"Series({len(result)}) value counts:\n{counts.to_string()}"
+                else:
+                    desc = f"Series({len(result)}) top value counts:\n{counts.head(5).to_string()}"
+            else:
+                desc = f"Series({len(result)}):\n{result.head(5).to_string()}"
+                if len(result) > 5:
+                    desc += f"\n... and {len(result)-5} more"
     else:
+        # For scalar or other results
         desc = str(result)[:300]
+        if len(str(result)) > 300:
+            desc += "..."
 
     if is_plot:
         prompt = f'''
         The user asked: "{query}".
         Below is a description of the plot result:
         {desc}
-        Explain in 2–3 concise sentences what the chart shows (no code talk).'''
+        Explain in 2–3 concise sentences what the chart shows and its key insights.'''
     else:
         prompt = f'''
         The user asked: "{query}".
-        The result value is: {desc}
-        Explain in 2–3 concise sentences what this tells about the data (no mention of charts).'''
+        The result is:
+        {desc}
+        Explain in 2–3 concise sentences what this tells about the data.'''
     return prompt
 
 # === ReasoningAgent (streaming) =========================================
