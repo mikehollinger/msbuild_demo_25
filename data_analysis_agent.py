@@ -315,6 +315,11 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
             The previous code generated an error:
             {error_msg}
             
+            Here is the previous code attempt that failed:
+            ```python
+            {code}
+            ```
+            
             Please fix the code to avoid this error.
             """
             logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
