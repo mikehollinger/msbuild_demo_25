@@ -32,12 +32,41 @@ load_dotenv()
 api_key = os.environ.get("NVIDIA_API_KEY")
 api_url = os.environ.get("API_URL")
 
-# Configure logging
+# Configure logging with colored log levels
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+
+# ANSI color codes for log levels
+LOG_COLORS = {
+    'DEBUG': '\033[36m',    # Cyan
+    'INFO': '\033[32m',     # Green
+    'WARNING': '\033[33m',  # Yellow
+    'ERROR': '\033[31m',    # Red
+    'CRITICAL': '\033[35m', # Magenta
+    'RESET': '\033[0m',     # Reset to default
+}
+
+# Custom formatter that adds color only to the log level
+class ColoredLevelFormatter(logging.Formatter):
+    def format(self, record):
+        levelname = record.levelname
+        if levelname in LOG_COLORS:
+            colored_levelname = f"{LOG_COLORS[levelname]}{levelname}{LOG_COLORS['RESET']}"
+            record.levelname = colored_levelname
+        return super().format(record)
+
+# Configure logging with the custom formatter
+formatter = ColoredLevelFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+
+# Set up root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+# Remove existing handlers to avoid duplicates
+for hdlr in root_logger.handlers[:]:
+    root_logger.removeHandler(hdlr)
+root_logger.addHandler(handler)
+
 logger = logging.getLogger(__name__)
 
 client = OpenAI(
