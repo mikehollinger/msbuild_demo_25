@@ -18,7 +18,7 @@ import pandas as pd
 import streamlit as st
 from openai import OpenAI
 import matplotlib.pyplot as plt
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional, Union, Callable
 from dotenv import load_dotenv
 import logging
 import sys
@@ -81,25 +81,119 @@ client = OpenAI(
   api_key = api_key
 )
 
+# === Unified API Call Function =====================================
+def call_llm_api(
+    prompt: str, 
+    system_content: str = "detailed thinking off.", 
+    stream: bool = False, 
+    temperature: float = 0.2, 
+    max_tokens: int = 1024, 
+    thinking_placeholder: Optional[Any] = None,
+    model: str = "nvidia/llama-3.3-nemotron-super-49b-v1"
+) -> Union[str, Tuple[str, str]]:
+    """
+    Unified function to call the LLM API with consistent handling of streaming and thinking tags.
+    
+    Args:
+        prompt: The user prompt to send to the LLM
+        system_content: System prompt to control LLM behavior
+        stream: Whether to stream the response
+        temperature: Temperature for generation
+        max_tokens: Maximum tokens to generate
+        thinking_placeholder: Streamlit placeholder for displaying thinking (only used if stream=True)
+        model: Model to use for inference
+        
+    Returns:
+        If stream=False: Just the response content
+        If stream=True: A tuple of (thinking_content, final_response)
+    """
+    logger.debug(f"Calling LLM API with prompt: {prompt}")
+    
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": prompt}
+    ]
+    
+    if not stream:
+        # Non-streaming call
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            result = response.choices[0].message.content
+            logger.debug(f"API non-streaming response: {result}")
+            return result
+        except Exception as exc:
+            error_msg = f"Error calling LLM API: {exc}"
+            logger.error(error_msg)
+            return error_msg
+    else:
+        # Streaming call with thinking tag extraction
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True
+            )
+            
+            full_response = ""
+            thinking_content = ""
+            in_think = False
+            
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    token = chunk.choices[0].delta.content
+                    full_response += token
+                    
+                    # Extract thinking tags as they stream
+                    if "<think>" in token:
+                        in_think = True
+                        token = token.split("<think>", 1)[1]
+                    if "</think>" in token:
+                        token = token.split("</think>", 1)[0]
+                        in_think = False
+                    if in_think or ("<think>" in full_response and not "</think>" in full_response):
+                        thinking_content += token
+                        if thinking_placeholder:
+                            thinking_placeholder.markdown(
+                                f'<details class="thinking" open><summary>🤔 Model Thinking</summary><pre>{thinking_content}</pre></details>',
+                                unsafe_allow_html=True
+                            )
+            
+            logger.debug(f"API streaming response completed, thinking content length: {len(thinking_content)}")
+            
+            # After streaming, extract final reasoning (outside <think>...</think>)
+            cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
+            return thinking_content, cleaned
+        except Exception as exc:
+            error_msg = f"Error in streaming LLM API call: {exc}"
+            logger.error(error_msg)
+            return "", error_msg
+
 # ------------------  QueryUnderstandingTool ---------------------------
 def QueryUnderstandingTool(query: str) -> bool:
     """Return True if the query seems to request a visualisation based on keywords."""
     # Use LLM to understand intent instead of keyword matching
-    messages = [
-        {"role": "system", "content": "detailed thinking off. You are an assistant that determines if a query is requesting a data visualization. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."},
-        {"role": "user", "content": query}
-    ]
+    system_content = "detailed thinking off. You are an assistant that determines if a query is requesting a data visualization. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
+    prompt = query
     
-    logger.debug(f"Calling QueryUnderstandingTool API with query: {query}")
-    response = client.chat.completions.create(
-        model="nvidia/llama-3.3-nemotron-super-49b-v1",
-        messages=messages,
+    logger.debug(f"Calling QueryUnderstandingTool with query: {query}")
+    
+    result = call_llm_api(
+        prompt=prompt,
+        system_content=system_content,
+        stream=False,
         temperature=0.1,
-        max_tokens=5  # We only need a short response
+        max_tokens=5
     )
     
     # Extract the response and convert to boolean
-    intent_response = response.choices[0].message.content.strip().lower()
+    intent_response = result.strip().lower()
     logger.info(f"Query understanding result: {intent_response} for query: {query}")
     return intent_response == "true"
 
@@ -150,6 +244,8 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
     error_msg = ""
     retries = 0
     
+    system_content = "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."
+    
     while retries <= max_retries:
         # If this is a retry, include the error message in the prompt
         retry_prompt = prompt
@@ -164,22 +260,15 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
             """
             logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
         
-        messages = [
-            {"role": "system", "content": "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."},
-            {"role": "user", "content": retry_prompt}
-        ]
-
-        logger.info(f"Calling code generation API with prompt: {retry_prompt}")
-        response = client.chat.completions.create(
-            model="nvidia/llama-3.3-nemotron-super-49b-v1",
-            messages=messages,
+        result = call_llm_api(
+            prompt=retry_prompt,
+            system_content=system_content,
+            stream=False,
             temperature=0.2,
             max_tokens=1024
         )
 
-        full_response = response.choices[0].message.content
-        logger.info(f"API response: {full_response}")
-        code = extract_first_code_block(full_response)
+        code = extract_first_code_block(result)
         logger.debug(f"Generated code: {code}")
         
         # Try executing the code
@@ -282,56 +371,26 @@ def ReasoningAgent(query: str, result: Any):
     logger.info("Generating reasoning about results")
     prompt = ReasoningCurator(query, result)
     logger.info(f"Reasoning prompt: {prompt}")
-    is_error = isinstance(result, str) and result.startswith("Error executing code")
-    is_plot = isinstance(result, (plt.Figure, plt.Axes))
 
     # Get the current reasoning state
     reasoning_enabled = st.session_state.get("reasoning_enabled", True)
     system_content = "detailed thinking on. You are an insightful data analyst." if reasoning_enabled else "detailed thinking off. You are an insightful data analyst."
 
-    # Streaming LLM call
-    logger.debug("Starting streaming reasoning API call")
-    response = client.chat.completions.create(
-        model="nvidia/llama-3.3-nemotron-super-49b-v1",
-        messages=[
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": prompt}
-        ],
+    # Use the unified API calling function with streaming
+    thinking_placeholder = st.empty()
+    
+    thinking_content, cleaned = call_llm_api(
+        prompt=prompt,
+        system_content=system_content,
+        stream=True,
         temperature=0.2,
         max_tokens=1024,
-        stream=True
+        thinking_placeholder=thinking_placeholder
     )
-
-    # Stream and display thinking
-    thinking_placeholder = st.empty()
-    full_response = ""
-    thinking_content = ""
-    in_think = False
-
-    for chunk in response:
-        if chunk.choices[0].delta.content is not None:
-            token = chunk.choices[0].delta.content
-            full_response += token
-
-            # Simple state machine to extract <think>...</think> as it streams
-            if "<think>" in token:
-                in_think = True
-                token = token.split("<think>", 1)[1]
-            if "</think>" in token:
-                token = token.split("</think>", 1)[0]
-                in_think = False
-            if in_think or ("<think>" in full_response and not "</think>" in full_response):
-                thinking_content += token
-                thinking_placeholder.markdown(
-                    f'<details class="thinking" open><summary>🤔 Model Thinking</summary><pre>{thinking_content}</pre></details>',
-                    unsafe_allow_html=True
-                )
-
+    
     logger.info(f"Completed streaming response, thinking content length: {len(thinking_content)}")
-    logger.debug(f"Completed streaming response: {full_response}")
     logger.debug(f"Model thinking: {thinking_content}")
-    # After streaming, extract final reasoning (outside <think>...</think>)
-    cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
+    
     return thinking_content, cleaned
 
 # === DataFrameSummary TOOL (pandas only) =========================================
@@ -356,22 +415,16 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
     """Uses the LLM to generate a brief summary and possible questions for the uploaded dataset."""
     logger.info(f"Generating dataset insights for DataFrame with shape: {df.shape}")
     prompt = DataFrameSummaryTool(df)
-    try:
-        logger.debug("Calling data insight API")
-        response = client.chat.completions.create(
-            model="nvidia/llama-3.3-nemotron-super-49b-v1",
-            messages=[
-                {"role": "system", "content": "detailed thinking off. You are a data analyst providing brief, focused insights."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=512
-        )
-        return response.choices[0].message.content
-    except Exception as exc:
-        error_msg = f"Error generating dataset insights: {exc}"
-        logger.error(error_msg)
-        return error_msg
+    
+    system_content = "detailed thinking off. You are a data analyst providing brief, focused insights."
+    
+    return call_llm_api(
+        prompt=prompt,
+        system_content=system_content,
+        stream=False,
+        temperature=0.2,
+        max_tokens=512
+    )
 
 # === Helpers ===========================================================
 
