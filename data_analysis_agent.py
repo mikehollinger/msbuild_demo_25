@@ -69,6 +69,13 @@ root_logger.addHandler(handler)
 
 logger = logging.getLogger(__name__)
 
+# Suppress matplotlib debug logs
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
+logging.getLogger('matplotlib.pyplot').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+
+
 client = OpenAI(
   base_url = api_url,
   api_key = api_key
@@ -133,36 +140,72 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
 
 # === CodeGenerationAgent ==============================================
 
-def CodeGenerationAgent(query: str, df: pd.DataFrame):
+def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
     """Selects the appropriate code generation tool and gets code from the LLM for the user's query."""
     logger.info(f"CodeGenerationAgent processing query: {query}")
     should_plot = QueryUnderstandingTool(query)
     prompt = PlotCodeGeneratorTool(df.columns.tolist(), query) if should_plot else CodeWritingTool(df.columns.tolist(), query)
+    
+    code = ""
+    error_msg = ""
+    retries = 0
+    
+    while retries <= max_retries:
+        # If this is a retry, include the error message in the prompt
+        retry_prompt = prompt
+        if retries > 0:
+            retry_prompt = f"""
+            {prompt}
+            
+            The previous code generated an error:
+            {error_msg}
+            
+            Please fix the code to avoid this error.
+            """
+            logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
+        
+        messages = [
+            {"role": "system", "content": "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."},
+            {"role": "user", "content": retry_prompt}
+        ]
 
-    messages = [
-        {"role": "system", "content": "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."},
-        {"role": "user", "content": prompt}
-    ]
+        logger.info(f"Calling code generation API with prompt: {retry_prompt}")
+        response = client.chat.completions.create(
+            model="nvidia/llama-3.3-nemotron-super-49b-v1",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1024
+        )
 
-    logger.debug(f"Calling code generation API with prompt length: {len(prompt)}")
-    response = client.chat.completions.create(
-        model="nvidia/llama-3.3-nemotron-super-49b-v1",
-        messages=messages,
-        temperature=0.2,
-        max_tokens=1024
-    )
-
-    full_response = response.choices[0].message.content
-    code = extract_first_code_block(full_response)
-    logger.debug(f"Generated code length: {len(code)}")
-    return code, should_plot, ""
+        full_response = response.choices[0].message.content
+        logger.info(f"API response: {full_response}")
+        code = extract_first_code_block(full_response)
+        logger.debug(f"Generated code: {code}")
+        
+        # Try executing the code
+        if code:
+            # Test execution to see if it works
+            result = ExecutionAgent(code, df, should_plot)
+            # Check if result is an error message
+            if isinstance(result, str) and result.startswith("Error executing code"):
+                error_msg = result
+                retries += 1
+                continue
+            else:
+                # Code executed successfully
+                return code, should_plot, error_msg
+        
+        retries += 1
+    
+    # If we've reached max retries and still have errors, return the last code anyway
+    logger.warning(f"Reached maximum retries ({max_retries}) with errors, returning last generated code")
+    return code, should_plot, error_msg
 
 # === ExecutionAgent ====================================================
 
 def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
     """Executes the generated code in a controlled environment and returns the result or error message."""
-    logger.info("Executing generated code")
-    logger.debug(f"Code to execute:\n{code}")
+    logger.debug(f"Executing generated code:\n{code}")
     
     env = {"pd": pd, "df": df}
     if should_plot:
@@ -238,6 +281,7 @@ def ReasoningAgent(query: str, result: Any):
     """Streams the LLM's reasoning about the result (plot or value) and extracts model 'thinking' and final explanation."""
     logger.info("Generating reasoning about results")
     prompt = ReasoningCurator(query, result)
+    logger.info(f"Reasoning prompt: {prompt}")
     is_error = isinstance(result, str) and result.startswith("Error executing code")
     is_plot = isinstance(result, (plt.Figure, plt.Axes))
 
@@ -283,7 +327,9 @@ def ReasoningAgent(query: str, result: Any):
                     unsafe_allow_html=True
                 )
 
-    logger.debug(f"Completed streaming response, thinking content length: {len(thinking_content)}")
+    logger.info(f"Completed streaming response, thinking content length: {len(thinking_content)}")
+    logger.debug(f"Completed streaming response: {full_response}")
+    logger.debug(f"Model thinking: {thinking_content}")
     # After streaming, extract final reasoning (outside <think>...</think>)
     cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
     return thinking_content, cleaned
@@ -427,6 +473,10 @@ def main():
 
                 # Show model explanation directly 
                 explanation_html = reasoning_txt
+
+                # Add retry information if there were retries
+                if code_thinking:
+                    explanation_html += f"\n\n<small><em>Note: Some code errors were fixed during generation.</em></small>"
 
                 # Code accordion with proper HTML <pre><code> syntax highlighting
                 code_html = (
