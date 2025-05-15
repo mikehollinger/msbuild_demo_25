@@ -17,7 +17,8 @@ import os, io, re
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
-import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
 from typing import List, Dict, Any, Tuple, Optional, Union, Callable
 from dotenv import load_dotenv
 import logging
@@ -69,12 +70,8 @@ root_logger.addHandler(handler)
 
 logger = logging.getLogger(__name__)
 
-# Suppress matplotlib debug logs
-logging.getLogger('matplotlib').setLevel(logging.WARNING)
-logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
-logging.getLogger('matplotlib.pyplot').setLevel(logging.WARNING)
+# Suppress httpcore debug logs
 logging.getLogger('httpcore').setLevel(logging.WARNING)
-
 
 client = OpenAI(
   base_url = api_url,
@@ -201,19 +198,21 @@ def QueryUnderstandingTool(query: str) -> bool:
 
 # ------------------  PlotCodeGeneratorTool ---------------------------
 def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
-    """Generate a prompt for the LLM to write pandas+matplotlib code for a plot based on the query and columns."""
+    """Generate a prompt for the LLM to write pandas+plotly code for a plot based on the query and columns."""
     logger.debug(f"Generating plot code prompt for query: {query}")
     return f"""
     Given DataFrame `df` with columns: {', '.join(cols)}
-    Write Python code using pandas **and matplotlib** (as plt) to answer:
+    Write Python code using pandas **and Plotly** to answer:
     "{query}"
 
     Rules
     -----
-    1. Use pandas for data manipulation and matplotlib.pyplot (as plt) for plotting.
-    2. Assign the final result (DataFrame, Series, scalar *or* matplotlib Figure) to a variable named `result`.
-    3. Create only ONE relevant plot. Set `figsize=(6,4)`, add title/labels.
-    4. Return your answer inside a single markdown fence that starts with ```python and ends with ```.
+    1. Use pandas for data manipulation and plotly.express (as px) or plotly.graph_objects (as go) for plotting.
+    2. Assign the final result (DataFrame, Series, scalar *or* Plotly Figure) to a variable named `result`.
+    3. Create only ONE relevant plot. Add descriptive title and axis labels.
+    4. For better Streamlit integration, use Plotly's update_layout() method to set plot size and margins.
+    5. Return your answer inside a single markdown fence that starts with ```python and ends with ```.
+    6. IMPORTANT: Do NOT include any import statements. The variables 'pd', 'df', 'px', and 'go' are already defined in the execution environment.
     """
 
 # ------------------  CodeWritingTool ---------------------------------
@@ -230,6 +229,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
     1. Use pandas operations on `df` only.
     2. Assign the final result to `result`.
     3. Wrap the snippet in a single ```python code fence (no extra prose).
+    4. IMPORTANT: Do NOT include any import statements. The variables 'pd' and 'df' are already defined in the execution environment.
     """
 
 # === CodeGenerationAgent ==============================================
@@ -244,7 +244,7 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3):
     error_msg = ""
     retries = 0
     
-    system_content = "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."
+    system_content = "detailed thinking off. You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment."
     
     while retries <= max_retries:
         # If this is a retry, include the error message in the prompt
@@ -298,8 +298,8 @@ def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
     
     env = {"pd": pd, "df": df}
     if should_plot:
-        plt.rcParams["figure.dpi"] = 100  # Set default DPI for all figures
-        env["plt"] = plt
+        env["px"] = px
+        env["go"] = go
         env["io"] = io
     
     stdout_capture = io.StringIO()
@@ -338,31 +338,162 @@ def ReasoningCurator(query: str, result: Any) -> str:
     """Builds and returns the LLM prompt for reasoning about the result."""
     logger.debug("Building reasoning prompt")
     is_error = isinstance(result, str) and result.startswith("Error executing code")
-    is_plot = isinstance(result, (plt.Figure, plt.Axes))
+    is_plot = 'plotly' in str(type(result))
 
     if is_error:
         desc = result
     elif is_plot:
+        # Extract information from Plotly figure
         title = ""
-        if isinstance(result, plt.Figure):
-            title = result._suptitle.get_text() if result._suptitle else ""
-        elif isinstance(result, plt.Axes):
-            title = result.get_title()
-        desc = f"[Plot Object: {title or 'Chart'}]"
+        data_summary = ""
+        
+        try:
+            # Get title from layout
+            if hasattr(result, 'layout') and hasattr(result.layout, 'title'):
+                if hasattr(result.layout.title, 'text'):
+                    title = result.layout.title.text
+                else:
+                    title = str(result.layout.title)
+            
+            # Extract data from the figure
+            if hasattr(result, 'data') and result.data:
+                # Determine chart type from first trace
+                trace = result.data[0]
+                trace_type = trace.type if hasattr(trace, 'type') else "unknown"
+                
+                # Get axis titles
+                x_title = result.layout.xaxis.title.text if hasattr(result.layout, 'xaxis') and hasattr(result.layout.xaxis, 'title') else "x"
+                y_title = result.layout.yaxis.title.text if hasattr(result.layout, 'yaxis') and hasattr(result.layout.yaxis, 'title') else "y"
+                
+                # Check if we have multiple traces (for grouped/stacked bars, multiple lines, etc)
+                trace_count = len(result.data)
+                has_multiple_traces = trace_count > 1
+                
+                # Extract series names/colors if multiple traces
+                series_names = []
+                if has_multiple_traces:
+                    for t in result.data:
+                        if hasattr(t, 'name') and t.name:
+                            series_names.append(t.name)
+                
+                # Extract some data points based on chart type
+                if trace_type == "bar":
+                    if has_multiple_traces:
+                        # For grouped/stacked bar charts
+                        categories = trace.x[:5] if hasattr(trace, 'x') else []
+                        chart_subtype = "grouped" if hasattr(result.layout, 'barmode') and result.layout.barmode == "group" else "stacked"
+                        
+                        # Extract sample data for each series
+                        series_data = []
+                        for i, t in enumerate(result.data[:3]):  # Limit to first 3 series for readability
+                            if hasattr(t, 'name') and hasattr(t, 'y'):
+                                series_name = t.name
+                                series_values = t.y[:5] if len(t.y) > 0 else []
+                                series_data.append(f"{series_name}: {series_values}")
+                        
+                        data_summary = f"Chart type: {chart_subtype.capitalize()} bar chart\nCategories: {categories}\nSeries values:\n" + "\n".join(series_data)
+                    else:
+                        # Simple bar chart
+                        x_data = trace.x[:5] if hasattr(trace, 'x') else []
+                        y_data = trace.y[:5] if hasattr(trace, 'y') else []
+                        data_summary = f"Chart type: Bar chart\nCategories: {x_data}\nValues: {y_data}"
+                
+                elif trace_type == "scatter":
+                    x_data = trace.x[:5] if hasattr(trace, 'x') else []
+                    y_data = trace.y[:5] if hasattr(trace, 'y') else []
+                    name = trace.name if hasattr(trace, 'name') else ""
+                    mode = trace.mode if hasattr(trace, 'mode') else ""
+                    
+                    if has_multiple_traces:
+                        # Extract sample data for each series
+                        series_data = []
+                        for i, t in enumerate(result.data[:3]):  # Limit to first 3 series for readability
+                            if hasattr(t, 'name') and hasattr(t, 'x') and hasattr(t, 'y'):
+                                series_name = t.name
+                                x_vals = t.x[:3] if len(t.x) > 0 else []
+                                y_vals = t.y[:3] if len(t.y) > 0 else []
+                                points = list(zip(x_vals, y_vals))
+                                series_data.append(f"{series_name}: {points}")
+                        
+                        data_summary = f"Chart type: Multi-series scatter plot ({mode})\nSeries values:\n" + "\n".join(series_data)
+                    else:
+                        data_summary = f"Chart type: Scatter ({mode})\nSeries: {name}\nSample points: {list(zip(x_data, y_data))}"
+                
+                elif trace_type == "pie":
+                    labels = trace.labels[:5] if hasattr(trace, 'labels') else []
+                    values = trace.values[:5] if hasattr(trace, 'values') else []
+                    data_summary = f"Chart type: Pie chart\nCategories: {labels}\nValues: {values}"
+                
+                else:
+                    # Generic extraction for other chart types
+                    data_summary = f"Chart type: {trace_type}\n"
+                    if has_multiple_traces:
+                        data_summary += f"Number of series: {trace_count}\n"
+                        if series_names:
+                            data_summary += f"Series names: {series_names}\n"
+                    
+                    for attr in ['x', 'y', 'z', 'values', 'labels']:
+                        if hasattr(trace, attr):
+                            attr_data = getattr(trace, attr)
+                            if attr_data and len(attr_data) > 0:
+                                data_summary += f"{attr}: {attr_data[:5]}\n"
+                
+                data_summary += f"\nAxes: {x_title} vs {y_title}"
+                
+        except Exception as e:
+            logger.warning(f"Error extracting Plotly figure info: {e}")
+            data_summary = "Plot details could not be extracted"
+        
+        desc = f"[Plot: {title or 'Chart'}]\n{data_summary}"
+    elif isinstance(result, pd.DataFrame):
+        # For DataFrame results, include shape and sample data
+        row_count = len(result)
+        col_count = len(result.columns)
+        
+        if row_count > 0:
+            # Include descriptive statistics if available
+            if all(pd.api.types.is_numeric_dtype(result[col]) for col in result.columns if col in result):
+                desc = f"DataFrame({row_count}×{col_count}):\nSummary statistics:\n{result.describe().to_string()}"
+            else:
+                # Include sample rows
+                sample_size = min(5, row_count)
+                desc = f"DataFrame({row_count}×{col_count}):\nSample rows:\n{result.head(sample_size).to_string()}"
+        else:
+            desc = f"Empty DataFrame with {col_count} columns"
+    elif isinstance(result, pd.Series):
+        # For Series results, include stats
+        if pd.api.types.is_numeric_dtype(result):
+            desc = f"Series({len(result)}):\n{result.describe().to_string()}"
+        else:
+            # For categorical series, show value counts
+            if hasattr(result, 'value_counts') and callable(getattr(result, 'value_counts')):
+                counts = result.value_counts()
+                if len(counts) <= 10:  # Show all if not too many categories
+                    desc = f"Series({len(result)}) value counts:\n{counts.to_string()}"
+                else:
+                    desc = f"Series({len(result)}) top value counts:\n{counts.head(5).to_string()}"
+            else:
+                desc = f"Series({len(result)}):\n{result.head(5).to_string()}"
+                if len(result) > 5:
+                    desc += f"\n... and {len(result)-5} more"
     else:
+        # For scalar or other results
         desc = str(result)[:300]
+        if len(str(result)) > 300:
+            desc += "..."
 
     if is_plot:
         prompt = f'''
         The user asked: "{query}".
         Below is a description of the plot result:
         {desc}
-        Explain in 2–3 concise sentences what the chart shows (no code talk).'''
+        Explain in 2–3 concise sentences what the chart shows and its key insights.'''
     else:
         prompt = f'''
         The user asked: "{query}".
-        The result value is: {desc}
-        Explain in 2–3 concise sentences what this tells about the data (no mention of charts).'''
+        The result is:
+        {desc}
+        Explain in 2–3 concise sentences what this tells about the data.'''
     return prompt
 
 # === ReasoningAgent (streaming) =========================================
@@ -444,8 +575,6 @@ def extract_first_code_block(text: str) -> str:
 def main():
     logger.info("Starting Data Analysis Agent application")
     st.set_page_config(layout="wide")
-    if "plots" not in st.session_state:
-        st.session_state.plots = []
     if "reasoning_enabled" not in st.session_state:
         st.session_state.reasoning_enabled = True  # Default to enabled
 
@@ -484,11 +613,9 @@ def main():
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"], unsafe_allow_html=True)
-                    if msg.get("plot_index") is not None:
-                        idx = msg["plot_index"]
-                        if 0 <= idx < len(st.session_state.plots):
-                            # Display plot at fixed size
-                            st.pyplot(st.session_state.plots[idx], use_container_width=False)
+                    if msg.get("figure") is not None:
+                        # Display Plotly figure directly
+                        st.plotly_chart(msg["figure"], use_container_width=True)
 
         if file:  # only allow chat after upload
             if user_q := st.chat_input("Ask about your data…"):
@@ -501,13 +628,11 @@ def main():
                     reasoning_txt = reasoning_txt.replace("`", "")
 
                 # Build assistant response
-                is_plot = isinstance(result_obj, (plt.Figure, plt.Axes))
-                plot_idx = None
+                is_plot = 'plotly' in str(type(result_obj))
+                figure = None
                 if is_plot:
-                    logger.debug("Storing generated plot")
-                    fig = result_obj.figure if isinstance(result_obj, plt.Axes) else result_obj
-                    st.session_state.plots.append(fig)
-                    plot_idx = len(st.session_state.plots) - 1
+                    logger.debug("Storing generated Plotly figure")
+                    figure = result_obj
                     header = "Here is the visualization you requested:"
                 elif isinstance(result_obj, (pd.DataFrame, pd.Series)):
                     header = f"Result: {len(result_obj)} rows" if isinstance(result_obj, pd.DataFrame) else "Result series"
@@ -547,7 +672,7 @@ def main():
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": assistant_msg,
-                    "plot_index": plot_idx
+                    "figure": figure
                 })
                 st.rerun()
 
