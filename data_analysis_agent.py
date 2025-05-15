@@ -83,7 +83,7 @@ def call_llm_api(
     prompt: str, 
     system_content: str = "detailed thinking off.", 
     stream: bool = False, 
-    temperature: float = 0.2, 
+    temperature: float = 0.0, 
     max_tokens: int = 4096, 
     thinking_placeholder: Optional[Any] = None,
     model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
@@ -238,7 +238,6 @@ def QueryUnderstandingTool(query: str) -> bool:
         prompt=prompt,
         system_content=system_content,
         stream=False,
-        temperature=0.1,
         max_tokens=5
     )
     
@@ -335,7 +334,6 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
             prompt=retry_prompt,
             system_content=system_content,
             stream=True,
-            temperature=0.2,
             max_tokens=8192,
             thinking_placeholder=current_thinking_placeholder,
             thinking_title="Code Generation Thinking"
@@ -456,38 +454,38 @@ def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
                 if trace_type == "bar":
                     if has_multiple_traces:
                         # For grouped/stacked bar charts
-                        categories = trace.x[:5] if hasattr(trace, 'x') else []
+                        categories = trace.x[:50] if hasattr(trace, 'x') else []
                         chart_subtype = "grouped" if hasattr(result.layout, 'barmode') and result.layout.barmode == "group" else "stacked"
                         
                         # Extract sample data for each series
                         series_data = []
-                        for i, t in enumerate(result.data[:3]):  # Limit to first 3 series for readability
+                        for i, t in enumerate(result.data[:5]):  # Limit to first 5 series for readability
                             if hasattr(t, 'name') and hasattr(t, 'y'):
                                 series_name = t.name
-                                series_values = t.y[:5] if len(t.y) > 0 else []
+                                series_values = t.y[:50] if len(t.y) > 0 else []
                                 series_data.append(f"{series_name}: {series_values}")
                         
                         data_summary = f"Chart type: {chart_subtype.capitalize()} bar chart\nCategories: {categories}\nSeries values:\n" + "\n".join(series_data)
                     else:
                         # Simple bar chart
-                        x_data = trace.x[:5] if hasattr(trace, 'x') else []
-                        y_data = trace.y[:5] if hasattr(trace, 'y') else []
+                        x_data = trace.x[:50] if hasattr(trace, 'x') else []
+                        y_data = trace.y[:50] if hasattr(trace, 'y') else []
                         data_summary = f"Chart type: Bar chart\nCategories: {x_data}\nValues: {y_data}"
                 
                 elif trace_type == "scatter":
-                    x_data = trace.x[:5] if hasattr(trace, 'x') else []
-                    y_data = trace.y[:5] if hasattr(trace, 'y') else []
+                    x_data = trace.x[:50] if hasattr(trace, 'x') else []
+                    y_data = trace.y[:50] if hasattr(trace, 'y') else []
                     name = trace.name if hasattr(trace, 'name') else ""
                     mode = trace.mode if hasattr(trace, 'mode') else ""
                     
                     if has_multiple_traces:
                         # Extract sample data for each series
                         series_data = []
-                        for i, t in enumerate(result.data[:3]):  # Limit to first 3 series for readability
+                        for i, t in enumerate(result.data[:5]):  # Limit to first 5 series for readability
                             if hasattr(t, 'name') and hasattr(t, 'x') and hasattr(t, 'y'):
                                 series_name = t.name
-                                x_vals = t.x[:3] if len(t.x) > 0 else []
-                                y_vals = t.y[:3] if len(t.y) > 0 else []
+                                x_vals = t.x[:50] if len(t.x) > 0 else []
+                                y_vals = t.y[:50] if len(t.y) > 0 else []
                                 points = list(zip(x_vals, y_vals))
                                 series_data.append(f"{series_name}: {points}")
                         
@@ -496,8 +494,8 @@ def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
                         data_summary = f"Chart type: Scatter ({mode})\nSeries: {name}\nSample points: {list(zip(x_data, y_data))}"
                 
                 elif trace_type == "pie":
-                    labels = trace.labels[:5] if hasattr(trace, 'labels') else []
-                    values = trace.values[:5] if hasattr(trace, 'values') else []
+                    labels = trace.labels[:50] if hasattr(trace, 'labels') else []
+                    values = trace.values[:50] if hasattr(trace, 'values') else []
                     data_summary = f"Chart type: Pie chart\nCategories: {labels}\nValues: {values}"
                 
                 else:
@@ -512,7 +510,7 @@ def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
                         if hasattr(trace, attr):
                             attr_data = getattr(trace, attr)
                             if attr_data and len(attr_data) > 0:
-                                data_summary += f"{attr}: {attr_data[:5]}\n"
+                                data_summary += f"{attr}: {attr_data[:50]}\n"
                 
                 data_summary += f"\nAxes: {x_title} vs {y_title}"
                 
@@ -532,7 +530,7 @@ def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
                 desc = f"DataFrame({row_count}×{col_count}):\nSummary statistics:\n{result.describe().to_string()}"
             else:
                 # Include sample rows
-                sample_size = min(5, row_count)
+                sample_size = min(50, row_count)
                 desc = f"DataFrame({row_count}×{col_count}):\nSample rows:\n{result.head(sample_size).to_string()}"
         else:
             desc = f"Empty DataFrame with {col_count} columns"
@@ -544,14 +542,16 @@ def ReasoningCurator(query: str, result: Any, code: str = "") -> str:
             # For categorical series, show value counts
             if hasattr(result, 'value_counts') and callable(getattr(result, 'value_counts')):
                 counts = result.value_counts()
-                if len(counts) <= 10:  # Show all if not too many categories
+                if len(counts) <= 50:  # Show all if not too many categories
                     desc = f"Series({len(result)}) value counts:\n{counts.to_string()}"
                 else:
-                    desc = f"Series({len(result)}) top value counts:\n{counts.head(5).to_string()}"
+                    desc = f"Series({len(result)}) top value counts:\n{counts.head(50).to_string()}"
             else:
-                desc = f"Series({len(result)}):\n{result.head(5).to_string()}"
-                if len(result) > 5:
-                    desc += f"\n... and {len(result)-5} more"
+                # Show up to 50 items for any series
+                max_display = min(50, len(result))
+                desc = f"Series({len(result)}):\n{result.head(max_display).to_string()}"
+                if len(result) > max_display:
+                    desc += f"\n... and {len(result)-max_display} more"
     else:
         # For scalar or other results
         desc = str(result)[:300]
@@ -598,7 +598,6 @@ def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder
         prompt=prompt,
         system_content=system_content,
         stream=True,
-        temperature=0.2,
         max_tokens=8192,
         thinking_placeholder=thinking_placeholder,
         thinking_title="Result Analysis Thinking"
@@ -634,14 +633,13 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
     
     base_prompt = "You are a data analyst providing brief, focused insights."
     system_content = get_system_prompt(base_prompt)
-    
-    return call_llm_api(
-        prompt=prompt,
-        system_content=system_content,
-        stream=False,
-        temperature=0.2,
-        max_tokens=8192
-    )
+    return "Placeholder"
+    #return call_llm_api(
+    #    prompt=prompt,
+    #    system_content=system_content,
+    #    stream=False,
+    #    max_tokens=8192
+    #)
 
 # === Main Streamlit App ===============================================
 
