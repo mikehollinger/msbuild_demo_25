@@ -185,38 +185,6 @@ def call_llm_api(
             
             # After streaming, extract final reasoning (outside <think>...</think>)
             cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
-            
-            # Check if we only got thinking content with no actual output
-            # If thinking is large (>20K chars) and output is empty/tiny, make a follow-up call
-            if len(thinking_content) > 20000 and (not cleaned or len(cleaned) < 100):
-                logger.warning(f"Excessive thinking content ({len(thinking_content)} chars) with minimal output. Making follow-up call.")
-                
-                # Create a follow-up prompt incorporating the thinking
-                follow_up_messages = [
-                    {"role": "system", "content": "detailed thinking off. Focus on producing a concise, direct answer."},
-                    {"role": "user", "content": f"""
-Based on the previous thinking:
-{thinking_content[:4000]}
-...
-[thinking abbreviated for brevity]
-...
-{thinking_content[-4000:] if len(thinking_content) > 4000 else ""}
-
-Generate your final answer to the original query: "{prompt}"
-"""}
-                ]
-                
-                # Make a non-streaming follow-up call
-                follow_up_response = client.chat.completions.create(
-                    model=model,
-                    messages=follow_up_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                
-                cleaned = follow_up_response.choices[0].message.content
-                logger.info(f"Generated follow-up response of {len(cleaned)} chars after excessive thinking")
-            
             return thinking_content, cleaned
         except Exception as exc:
             error_msg = f"Error in streaming LLM API call: {exc}"
