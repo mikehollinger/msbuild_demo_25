@@ -73,6 +73,12 @@ logger = logging.getLogger(__name__)
 # Suppress httpcore debug logs
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
+
+# Get rumination detection threshold from environment or use default
+MAX_THINKING_CHARS = int(os.environ.get("MAX_THINKING_CHARS", "16000"))
+logger.info(f"Rumination detection threshold set to {MAX_THINKING_CHARS} characters")
+
+
 client = OpenAI(
   base_url = api_url,
   api_key = api_key
@@ -87,8 +93,9 @@ def call_llm_api(
     max_tokens: int = 4096, 
     thinking_placeholder: Optional[Any] = None,
     model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
-    thinking_title: str = "Model Thinking"
-) -> Union[str, Tuple[str, str]]:
+    thinking_title: str = "Model Thinking",
+    max_thinking_chars: int = None
+) -> Union[str, Tuple[str, str], Tuple[str, str, bool]]:
     """
     Unified function to call the LLM API with consistent handling of streaming and thinking tags.
     
@@ -101,11 +108,17 @@ def call_llm_api(
         thinking_placeholder: Streamlit placeholder for displaying thinking (only used if stream=True)
         model: Model to use for inference
         thinking_title: Title to display in the thinking section
+        max_thinking_chars: Maximum characters to allow in thinking before detecting rumination
         
     Returns:
         If stream=False: Just the response content with thinking tags removed
-        If stream=True: A tuple of (thinking_content, final_response)
+        If stream=True: A tuple of (thinking_content, final_response, ruminated)
+        Where ruminated is a boolean indicating if the model was detected to be ruminating
     """
+    # Use the global variable if max_thinking_chars is not provided
+    if max_thinking_chars is None:
+        max_thinking_chars = MAX_THINKING_CHARS
+        
     logger.debug(f"Calling LLM API with prompt: {prompt}")
     
     messages = [
@@ -160,6 +173,7 @@ def call_llm_api(
             full_response = ""
             thinking_content = ""
             in_think = False
+            ruminated = False
             
             for chunk in response:
                 if chunk.choices[0].delta.content is not None:
@@ -175,6 +189,13 @@ def call_llm_api(
                         in_think = False
                     if in_think or ("<think>" in full_response and not "</think>" in full_response):
                         thinking_content += token
+                        
+                        # Check for rumination - if thinking content exceeds the max length
+                        if len(thinking_content) > max_thinking_chars:
+                            logger.warning(f"Detected model rumination (thinking content: {len(thinking_content)} chars)")
+                            ruminated = True
+                            break  # Stop processing the stream
+                            
                         if thinking_placeholder:
                             thinking_placeholder.markdown(
                                 f'<details class="thinking" open><summary>🤔 {thinking_title}</summary><pre>{thinking_content}</pre></details>',
@@ -185,11 +206,11 @@ def call_llm_api(
             
             # After streaming, extract final reasoning (outside <think>...</think>)
             cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
-            return thinking_content, cleaned
+            return thinking_content, cleaned, ruminated
         except Exception as exc:
             error_msg = f"Error in streaming LLM API call: {exc}"
             logger.error(error_msg)
-            return "", error_msg
+            return "", error_msg, False
 
 # === Helpers ===========================================================
 
@@ -343,34 +364,51 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
     error_msg = ""
     thinking_content = ""
     retries = 0
+    ruminated_once = False
     
-    base_prompt = "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment."
+    base_prompt = "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment. If you use <think> tags for your reasoning, you MUST always ensure your final response includes a ```python code block OUTSIDE of the thinking tags."
     system_content = get_system_prompt(base_prompt)
     
     while retries <= max_retries:
-        # If this is a retry, include the error message in the prompt
+        # If this is a retry, include the error message or rumination issue in the prompt
         retry_prompt = prompt
         if retries > 0:
-            retry_prompt = f"""
-            {prompt}
-            
-            The previous code generated an error:
-            {error_msg}
-            
-            Here is the previous code attempt that failed:
-            ```python
-            {code}
-            ```
-            
-            Please fix the code to avoid this error.
-            """
-            logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
+            if ruminated_once:
+                # Get the last 1000 characters of the thinking content as context
+                last_thinking = thinking_content[-2000:] if len(thinking_content) > 2000 else thinking_content
+                retry_prompt = f"""
+                {prompt}
+                
+                In a previous attempt, you were stuck in a loop of extended thinking without providing a solution.
+                Here's the end of your previous thinking:
+                
+                {last_thinking}
+                
+                Please be more direct and efficient in your approach. Focus on completing the task as succinctly as possible.
+                """
+                logger.info(f"Retrying after rumination detection (attempt {retries}/{max_retries})")
+                ruminated_once = False  # Reset for this attempt
+            elif error_msg:
+                retry_prompt = f"""
+                {prompt}
+                
+                The previous code generated an error:
+                {error_msg}
+                
+                Here is the previous code attempt that failed:
+                ```python
+                {code}
+                ```
+                
+                Please fix the code to avoid this error.
+                """
+                logger.info(f"Retrying code generation (attempt {retries}/{max_retries}) after error: {error_msg}")
         
         # Create a placeholder for thinking output
         current_thinking_placeholder = thinking_placeholder or st.empty()
         
         # Use streaming API call to show thinking in real-time
-        current_thinking, result = call_llm_api(
+        current_thinking, result, ruminated = call_llm_api(
             prompt=retry_prompt,
             system_content=system_content,
             stream=True,
@@ -381,6 +419,13 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
         
         # Save the thinking content
         thinking_content = current_thinking
+
+        # Check if rumination was detected
+        if ruminated:
+            logger.warning("Model rumination detected, will retry with truncated thinking prompt")
+            ruminated_once = True
+            retries += 1
+            continue
 
         code = extract_first_code_block(result)
         logger.debug(f"Generated code: {code}")
@@ -650,7 +695,7 @@ def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder
     # Use the unified API calling function with streaming
     thinking_placeholder = thinking_placeholder or st.empty()
     
-    thinking_content, cleaned = call_llm_api(
+    thinking_content, cleaned, ruminated = call_llm_api(
         prompt=prompt,
         system_content=system_content,
         stream=True,
@@ -661,6 +706,11 @@ def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder
     
     logger.info(f"Completed streaming response, thinking content length: {len(thinking_content)}")
     logger.debug(f"Model thinking: {thinking_content}")
+    
+    # Handle rumination case
+    if ruminated:
+        logger.warning("Rumination detected in reasoning agent, returning truncated explanation")
+        cleaned = "The data analysis shows interesting patterns in the results. [Note: Analysis was truncated due to extended processing]"
     
     return thinking_content, cleaned
 
