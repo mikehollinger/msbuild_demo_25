@@ -36,6 +36,7 @@ api_url = os.environ.get("API_URL")
 # Configure logging with colored log levels
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+
 # ANSI color codes for log levels
 LOG_COLORS = {
     'DEBUG': '\033[36m',    # Cyan
@@ -79,6 +80,12 @@ MAX_THINKING_CHARS = int(os.environ.get("MAX_THINKING_CHARS", "16000"))
 logger.info(f"Rumination detection threshold set to {MAX_THINKING_CHARS} characters")
 
 
+# Get seed value from environment variable or use a default
+SEED_VALUE = int(os.environ.get("LLM_SEED", "42"))
+logger = logging.getLogger(__name__)
+logger.info(f"Using seed value {SEED_VALUE} for LLM API calls")
+
+
 client = OpenAI(
   base_url = api_url,
   api_key = api_key
@@ -94,7 +101,8 @@ def call_llm_api(
     thinking_placeholder: Optional[Any] = None,
     model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
     thinking_title: str = "Model Thinking",
-    max_thinking_chars: int = None
+    max_thinking_chars: int = None,
+    top_p: float = 1.0
 ) -> Union[str, Tuple[str, str], Tuple[str, str, bool]]:
     """
     Unified function to call the LLM API with consistent handling of streaming and thinking tags.
@@ -109,6 +117,7 @@ def call_llm_api(
         model: Model to use for inference
         thinking_title: Title to display in the thinking section
         max_thinking_chars: Maximum characters to allow in thinking before detecting rumination
+        top_p: Nucleus sampling parameter (1.0 means no nucleus sampling filter)
         
     Returns:
         If stream=False: Just the response content with thinking tags removed
@@ -133,7 +142,9 @@ def call_llm_api(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                seed=SEED_VALUE,  # Add seed parameter for deterministic output
+                top_p=top_p  # Add top_p parameter for deterministic output
             )
             result = response.choices[0].message.content
             logger.debug(f"API non-streaming response: {result}")
@@ -167,7 +178,9 @@ def call_llm_api(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=True
+                stream=True,
+                seed=SEED_VALUE,  # Add seed parameter for deterministic output
+                top_p=top_p  # Add top_p parameter for deterministic output
             )
             
             full_response = ""
@@ -249,7 +262,8 @@ def QueryUnderstandingTool(query: str) -> bool:
     """Return True if the query seems to request a visualisation based on keywords."""
     # Use LLM to understand intent instead of keyword matching
     base_prompt = "You are an assistant that determines if a query is requesting a data visualization or data that is a simple list of key/value pairs. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
-    system_content = get_system_prompt(base_prompt)
+    # Explicitly disable thinking mode for this API call to ensure we get a usable response with max_tokens=5
+    system_content = "detailed thinking off. " + base_prompt
     
     prompt = query
     
