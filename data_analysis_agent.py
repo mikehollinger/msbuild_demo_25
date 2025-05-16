@@ -36,6 +36,7 @@ api_url = os.environ.get("API_URL")
 # Configure logging with colored log levels
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+
 # ANSI color codes for log levels
 LOG_COLORS = {
     'DEBUG': '\033[36m',    # Cyan
@@ -77,6 +78,12 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 # Get rumination detection threshold from environment or use default
 MAX_THINKING_CHARS = int(os.environ.get("MAX_THINKING_CHARS", "16000"))
 logger.info(f"Rumination detection threshold set to {MAX_THINKING_CHARS} characters")
+
+
+# Get seed value from environment variable or use a default
+SEED_VALUE = int(os.environ.get("LLM_SEED", "42"))
+logger = logging.getLogger(__name__)
+logger.info(f"Using seed value {SEED_VALUE} for LLM API calls")
 
 
 client = OpenAI(
@@ -133,7 +140,8 @@ def call_llm_api(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                seed=SEED_VALUE  # Add seed parameter for deterministic output
             )
             result = response.choices[0].message.content
             logger.debug(f"API non-streaming response: {result}")
@@ -167,7 +175,8 @@ def call_llm_api(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=True
+                stream=True,
+                seed=SEED_VALUE  # Add seed parameter for deterministic output
             )
             
             full_response = ""
@@ -249,7 +258,8 @@ def QueryUnderstandingTool(query: str) -> bool:
     """Return True if the query seems to request a visualisation based on keywords."""
     # Use LLM to understand intent instead of keyword matching
     base_prompt = "You are an assistant that determines if a query is requesting a data visualization or data that is a simple list of key/value pairs. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
-    system_content = get_system_prompt(base_prompt)
+    # Explicitly disable thinking mode for this API call to ensure we get a usable response with max_tokens=5
+    system_content = "detailed thinking off. " + base_prompt
     
     prompt = query
     
