@@ -227,7 +227,7 @@ def get_system_prompt(base_prompt: str) -> str:
 def QueryUnderstandingTool(query: str) -> bool:
     """Return True if the query seems to request a visualisation based on keywords."""
     # Use LLM to understand intent instead of keyword matching
-    base_prompt = "You are an assistant that determines if a query is requesting a data visualization. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
+    base_prompt = "You are an assistant that determines if a query is requesting a data visualization or data that is a simple list of key/value pairs. Respond with only 'true' if the query is asking for a plot, chart, graph, or any visual representation of data. Otherwise, respond with 'false'."
     system_content = get_system_prompt(base_prompt)
     
     prompt = query
@@ -253,8 +253,23 @@ def QueryUnderstandingTool(query: str) -> bool:
 def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas+plotly code for a plot based on the query and columns."""
     logger.debug(f"Generating plot code prompt for query: {query}")
+    
+    # Get data types and sample data
+    df_sample = st.session_state.df.head(3)
+    dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
+    dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
+    
+    # Create sample data string
+    sample_rows = df_sample.to_string(index=False)
+    
     return f"""
-    Given DataFrame `df` with columns: {', '.join(cols)}
+    Given DataFrame `df` with:
+    
+    COLUMNS AND TYPES: {dtypes_str}
+    
+    SAMPLE DATA:
+    {sample_rows}
+    
     Write Python code using pandas **and Plotly** to answer:
     "{query}"
 
@@ -266,14 +281,34 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     4. For better Streamlit integration, use Plotly's update_layout() method to set plot size and margins.
     5. Return your answer inside a single markdown fence that starts with ```python and ends with ```.
     6. IMPORTANT: Do NOT include any import statements. The variables 'pd', 'df', 'px', and 'go' are already defined in the execution environment.
+    7. Handle edge cases to avoid NaN results:
+       - When using groupby with aggregations like std(), var(), etc., ensure there are at least 2 values per group
+       - Check with .count() if needed and filter groups with sufficient data
+       - For variance/standard deviation, consider using .agg(['mean', 'std']) to provide context
+       - Add appropriate filters to ensure valid calculations before plotting
     """
 
 # ------------------  CodeWritingTool ---------------------------------
 def CodeWritingTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas-only code for a data query (no plotting)."""
     logger.debug(f"Generating data analysis code prompt for query: {query}")
+    
+    # Get data types and sample data
+    df_sample = st.session_state.df.head(3)
+    dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
+    dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
+    
+    # Create sample data string
+    sample_rows = df_sample.to_string(index=False)
+    
     return f"""
-    Given DataFrame `df` with columns: {', '.join(cols)}
+    Given DataFrame `df` with:
+    
+    COLUMNS AND TYPES: {dtypes_str}
+    
+    SAMPLE DATA:
+    {sample_rows}
+    
     Write Python code (pandas **only**, no plotting) to answer:
     "{query}"
 
@@ -283,6 +318,11 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
     2. Assign the final result to `result`.
     3. Wrap the snippet in a single ```python code fence (no extra prose).
     4. IMPORTANT: Do NOT include any import statements. The variables 'pd' and 'df' are already defined in the execution environment.
+    5. Handle edge cases to avoid NaN results:
+       - When using groupby with aggregations like std(), var(), etc., ensure there are at least 2 values per group
+       - Check with .count() if needed and filter groups with sufficient data
+       - For variance/standard deviation, consider using .agg(['mean', 'std']) to provide context
+       - Add appropriate filters to ensure valid calculations
     """
 
 # === CodeGenerationAgent ==============================================
@@ -392,6 +432,22 @@ def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
             logger.debug(f"Code execution stderr:\n{stderr_content}")
             
         result = env.get("result", None)
+        
+        # Check for NaN values in the result
+        if isinstance(result, pd.DataFrame) and result.isna().any().any():
+            nan_percentage = result.isna().mean().mean() * 100
+            # Only flag as error if significant NaN presence
+            if nan_percentage > 25:  # If more than 25% of the values are NaN
+                logger.warning(f"Result contains {nan_percentage:.1f}% NaN values")
+                error_msg = f"Error executing code: Result contains {nan_percentage:.1f}% NaN values. This likely means there's insufficient data for the calculation (e.g., trying to calculate standard deviation with only one value per group). Please revise the approach."
+                return error_msg
+        elif isinstance(result, pd.Series) and result.isna().any():
+            nan_percentage = result.isna().mean() * 100
+            if nan_percentage > 25:  # If more than 25% of the values are NaN
+                logger.warning(f"Result contains {nan_percentage:.1f}% NaN values")
+                error_msg = f"Error executing code: Result contains {nan_percentage:.1f}% NaN values. This likely means there's insufficient data for the calculation. Please revise the approach."
+                return error_msg
+        
         return result
     except Exception as exc:
         error_msg = f"Error executing code: {exc}"
@@ -696,6 +752,28 @@ def main():
         border-radius: 4px;
         border: 1px solid #e6e6e6;
     }
+    details.data {
+        background-color: #f0f8ff;
+        padding: 12px;
+        border-radius: 8px;
+        margin-top: 15px;
+        border-left: 5px solid #3cb371;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+    details.data summary {
+        cursor: pointer;
+        font-weight: bold;
+        color: #333;
+        margin-bottom: 8px;
+    }
+    details.data pre {
+        background-color: #ffffff;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #e6e6e6;
+        max-height: 300px;
+        overflow-y: auto;
+    }
     .thinking-container {
         border: 1px solid #ddd;
         border-radius: 8px;
@@ -725,7 +803,7 @@ def main():
                 st.session_state.messages = []
                 with st.spinner("Generating dataset insights …"):
                     st.session_state.insights = DataInsightAgent(st.session_state.df)
-            st.dataframe(st.session_state.df.head())
+            st.dataframe(st.session_state.df)
             st.markdown("### Dataset Insights")
             st.markdown(st.session_state.insights)
         else:
@@ -749,6 +827,10 @@ def main():
             if user_q := st.chat_input("Ask about your data…"):
                 logger.info(f"Received user query: {user_q}")
                 st.session_state.messages.append({"role": "user", "content": user_q})
+                
+                # Display the user message immediately 
+                with st.chat_message("user"):
+                    st.markdown(user_q)
                 
                 # Create containers for thinking output that won't be overwritten
                 thinking_container = st.container()
@@ -795,6 +877,9 @@ def main():
                         '<details class="thinking">'
                         '<summary>🧮 Code Generation Process</summary>'
                         f'<pre>{thinking_content}</pre>'
+                        '<hr/>'
+                        '<strong>Generated Code:</strong>'
+                        f'<pre><code class="language-python">{code}</code></pre>'
                         '</details>'
                     )
 
@@ -805,6 +890,26 @@ def main():
                         '<details class="thinking">'
                         '<summary>🧠 Result Analysis Process</summary>'
                         f'<pre>{raw_thinking}</pre>'
+                        '</details>'
+                    )
+
+                # Create HTML for DataFrame/Series results if applicable
+                data_result_html = ""
+                if isinstance(result_obj, (pd.DataFrame, pd.Series, pd.Index)) and not isinstance(result_obj, str):
+                    if isinstance(result_obj, pd.DataFrame):
+                        # For DataFrames, format with to_html
+                        result_display = result_obj.to_html(max_rows=20, classes="dataframe table table-striped")
+                    elif isinstance(result_obj, pd.Index):
+                        # For Index objects, convert to Series first then to string
+                        result_display = pd.Series(result_obj).to_string()
+                    else:
+                        # For Series, convert to string representation
+                        result_display = result_obj.to_string()
+                    
+                    data_result_html = (
+                        '<details class="data" open>'
+                        '<summary>📊 Data Result</summary>'
+                        f'<div style="max-height: 300px; overflow-y: auto;">{result_display}</div>'
                         '</details>'
                     )
 
@@ -830,7 +935,20 @@ def main():
                 if code_thinking_html or reasoning_thinking_html:
                     thinking_html = f"{code_thinking_html}{reasoning_thinking_html}"
                 
-                assistant_msg = f"{thinking_html}{explanation_html}\n\n{code_html}"
+                # Put together the final message with proper ordering:
+                # 1. Thinking sections (if enabled)
+                # 2. Plot (if any)
+                # 3. Data result (in collapsible section)
+                # 4. Explanation
+                # 5. Code
+                assistant_msg = f"{thinking_html}"
+                # Note: Plot will be added separately via st.plotly_chart
+                
+                # Add data result HTML after plot (will appear before explanation)
+                assistant_msg += data_result_html
+                
+                # Add explanation and code
+                assistant_msg += f"{explanation_html}\n\n{code_html}"
 
                 logger.debug("Adding assistant response to session state")
                 st.session_state.messages.append({
