@@ -253,8 +253,23 @@ def QueryUnderstandingTool(query: str) -> bool:
 def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas+plotly code for a plot based on the query and columns."""
     logger.debug(f"Generating plot code prompt for query: {query}")
+    
+    # Get data types and sample data
+    df_sample = st.session_state.df.head(3)
+    dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
+    dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
+    
+    # Create sample data string
+    sample_rows = df_sample.to_string(index=False)
+    
     return f"""
-    Given DataFrame `df` with columns: {', '.join(cols)}
+    Given DataFrame `df` with:
+    
+    COLUMNS AND TYPES: {dtypes_str}
+    
+    SAMPLE DATA:
+    {sample_rows}
+    
     Write Python code using pandas **and Plotly** to answer:
     "{query}"
 
@@ -277,8 +292,23 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
 def CodeWritingTool(cols: List[str], query: str) -> str:
     """Generate a prompt for the LLM to write pandas-only code for a data query (no plotting)."""
     logger.debug(f"Generating data analysis code prompt for query: {query}")
+    
+    # Get data types and sample data
+    df_sample = st.session_state.df.head(3)
+    dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
+    dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
+    
+    # Create sample data string
+    sample_rows = df_sample.to_string(index=False)
+    
     return f"""
-    Given DataFrame `df` with columns: {', '.join(cols)}
+    Given DataFrame `df` with:
+    
+    COLUMNS AND TYPES: {dtypes_str}
+    
+    SAMPLE DATA:
+    {sample_rows}
+    
     Write Python code (pandas **only**, no plotting) to answer:
     "{query}"
 
@@ -773,7 +803,7 @@ def main():
                 st.session_state.messages = []
                 with st.spinner("Generating dataset insights …"):
                     st.session_state.insights = DataInsightAgent(st.session_state.df)
-            st.dataframe(st.session_state.df.head())
+            st.dataframe(st.session_state.df)
             st.markdown("### Dataset Insights")
             st.markdown(st.session_state.insights)
         else:
@@ -797,6 +827,10 @@ def main():
             if user_q := st.chat_input("Ask about your data…"):
                 logger.info(f"Received user query: {user_q}")
                 st.session_state.messages.append({"role": "user", "content": user_q})
+                
+                # Display the user message immediately 
+                with st.chat_message("user"):
+                    st.markdown(user_q)
                 
                 # Create containers for thinking output that won't be overwritten
                 thinking_container = st.container()
@@ -843,6 +877,9 @@ def main():
                         '<details class="thinking">'
                         '<summary>🧮 Code Generation Process</summary>'
                         f'<pre>{thinking_content}</pre>'
+                        '<hr/>'
+                        '<strong>Generated Code:</strong>'
+                        f'<pre><code class="language-python">{code}</code></pre>'
                         '</details>'
                     )
 
@@ -858,10 +895,13 @@ def main():
 
                 # Create HTML for DataFrame/Series results if applicable
                 data_result_html = ""
-                if isinstance(result_obj, (pd.DataFrame, pd.Series)) and not isinstance(result_obj, str):
+                if isinstance(result_obj, (pd.DataFrame, pd.Series, pd.Index)) and not isinstance(result_obj, str):
                     if isinstance(result_obj, pd.DataFrame):
                         # For DataFrames, format with to_html
                         result_display = result_obj.to_html(max_rows=20, classes="dataframe table table-striped")
+                    elif isinstance(result_obj, pd.Index):
+                        # For Index objects, convert to Series first then to string
+                        result_display = pd.Series(result_obj).to_string()
                     else:
                         # For Series, convert to string representation
                         result_display = result_obj.to_string()
