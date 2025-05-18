@@ -25,6 +25,7 @@ import logging
 import sys
 from contextlib import redirect_stdout, redirect_stderr
 import tiktoken  # Add tiktoken for token counting
+import traceback  # Import traceback for error line information
 
 
 # Load environment variables from .env file
@@ -129,7 +130,7 @@ def call_llm_api(
     if max_thinking_chars is None:
         max_thinking_chars = MAX_THINKING_CHARS
         
-    logger.debug(f"Calling LLM API with prompt: {prompt}")
+    logger.info(f"Calling LLM API with prompt: {prompt}")
     
     messages = [
         {"role": "system", "content": system_content},
@@ -339,6 +340,7 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     
     # Get data types and sample data
     df_sample = st.session_state.df.head(3)
+    total_rows = len(st.session_state.df)
     dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
     dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
     
@@ -346,7 +348,7 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     sample_rows = df_sample.to_string(index=False)
     
     return f"""
-    Given DataFrame `df` with:
+    Given DataFrame `df` with {total_rows} total rows and columns:
     
     COLUMNS AND TYPES: {dtypes_str}
     
@@ -364,11 +366,17 @@ def PlotCodeGeneratorTool(cols: List[str], query: str) -> str:
     4. For better Streamlit integration, use Plotly's update_layout() method to set plot size and margins.
     5. Return your answer inside a single markdown fence that starts with ```python and ends with ```.
     6. IMPORTANT: Do NOT include any import statements. The variables 'pd', 'df', 'px', and 'go' are already defined in the execution environment.
-    7. Handle edge cases to avoid NaN results:
+    7. When building boolean masks, use `&`, `|`, `~` **with parentheses around every comparison**; never use `and`/`or` on Series.
+    8. Never pass a Series to `if`, `while`, or `break` conditions—reduce with `.any()` / `.all()` / `.empty` instead.
+    9. Handle edge cases to avoid NaN results:
        - When using groupby with aggregations like std(), var(), etc., ensure there are at least 2 values per group
        - Check with .count() if needed and filter groups with sufficient data
        - For variance/standard deviation, consider using .agg(['mean', 'std']) to provide context
        - Add appropriate filters to ensure valid calculations before plotting
+    
+    The first triple back-tick after this sentence must open your final code block.
+
+    Begin.
     """
 
 # ------------------  CodeWritingTool ---------------------------------
@@ -378,6 +386,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
     
     # Get data types and sample data
     df_sample = st.session_state.df.head(3)
+    total_rows = len(st.session_state.df)
     dtypes_info = {col: str(st.session_state.df[col].dtype) for col in cols}
     dtypes_str = ", ".join([f"{col} ({dtype})" for col, dtype in dtypes_info.items()])
     
@@ -385,7 +394,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
     sample_rows = df_sample.to_string(index=False)
     
     return f"""
-    Given DataFrame `df` with:
+    Given DataFrame `df` with {total_rows} total rows and columns:
     
     COLUMNS AND TYPES: {dtypes_str}
     
@@ -544,7 +553,7 @@ def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
     
     try:
         with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            exec(code, {}, env)
+            exec(code, env, env)
         
         stdout_content = stdout_capture.getvalue()
         stderr_content = stderr_capture.getvalue()
@@ -573,7 +582,39 @@ def ExecutionAgent(code: str, df: pd.DataFrame, should_plot: bool):
         
         return result
     except Exception as exc:
+        # Get traceback info including line number
+        tb = traceback.extract_tb(sys.exc_info()[2])
+        # Find the error line in the generated code
+        error_line_num = None
+        error_line_text = None
+        error_context = []
+        
+        # Split code into lines for context
+        code_lines = code.split('\n')
+        
+        for frame in tb:
+            # Check if the traceback is from our generated code
+            if frame.filename == '<string>':
+                # Line numbers in tracebacks are 1-indexed
+                error_line_num = frame.lineno
+                if 0 < error_line_num <= len(code_lines):
+                    error_line_text = code_lines[error_line_num-1]
+                    
+                    # Get context: a few lines before and after the error
+                    start_line = max(0, error_line_num-3)
+                    end_line = min(len(code_lines), error_line_num+2)
+                    
+                    for i in range(start_line, end_line):
+                        prefix = "→ " if i+1 == error_line_num else "  "
+                        line_num = i+1
+                        error_context.append(f"{prefix}{line_num}: {code_lines[i]}")
+                    
+                    break
+        
         error_msg = f"Error executing code: {exc}"
+        if error_line_num:
+            error_msg = f"Error executing code at line {error_line_num}: {exc}\n\nError context:\n" + "\n".join(error_context)
+        
         logger.error(error_msg)
         
         stdout_content = stdout_capture.getvalue()
@@ -818,13 +859,14 @@ def DataInsightAgent(df: pd.DataFrame) -> str:
     
     base_prompt = "You are a data analyst providing brief, focused insights."
     system_content = get_system_prompt(base_prompt)
-    return "Placeholder"
-    #return call_llm_api(
-    #    prompt=prompt,
-    #    system_content=system_content,
-    #    stream=False,
-    #    max_tokens=8192
-    #)
+
+    result, tokencounts = call_llm_api(
+        prompt=prompt,
+        system_content=system_content,
+        stream=False,
+        max_tokens=8192
+    )
+    return result
 
 # === Main Streamlit App ===============================================
 
