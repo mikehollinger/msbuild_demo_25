@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 import logging
 import sys
 from contextlib import redirect_stdout, redirect_stderr
+import tiktoken  # Add tiktoken for token counting
 
 
 # Load environment variables from .env file
@@ -103,7 +104,7 @@ def call_llm_api(
     thinking_title: str = "Model Thinking",
     max_thinking_chars: int = None,
     top_p: float = 1.0
-) -> Union[str, Tuple[str, str], Tuple[str, str, bool]]:
+) -> Union[str, Tuple[str, str], Tuple[str, str, bool], Tuple[str, Dict[str, int]], Tuple[str, str, bool, Dict[str, int]]]:
     """
     Unified function to call the LLM API with consistent handling of streaming and thinking tags.
     
@@ -120,9 +121,9 @@ def call_llm_api(
         top_p: Nucleus sampling parameter (1.0 means no nucleus sampling filter)
         
     Returns:
-        If stream=False: Just the response content with thinking tags removed
-        If stream=True: A tuple of (thinking_content, final_response, ruminated)
-        Where ruminated is a boolean indicating if the model was detected to be ruminating
+        If stream=False: A tuple of (response_content, token_counts)
+        If stream=True: A tuple of (thinking_content, final_response, ruminated, token_counts)
+        Where token_counts is a dictionary with input_tokens, output_tokens, and total_tokens
     """
     # Use the global variable if max_thinking_chars is not provided
     if max_thinking_chars is None:
@@ -135,6 +136,31 @@ def call_llm_api(
         {"role": "user", "content": prompt}
     ]
     
+    # Initialize token counts dictionary
+    token_counts = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0
+    }
+    
+    # Get encoding based on model
+    try:
+        if "llama" in model.lower():
+            encoding = tiktoken.encoding_for_model("gpt-4")  # Use gpt-4 encoding as approximation
+        else:
+            encoding = tiktoken.encoding_for_model(model)
+    except:
+        # Fallback to cl100k_base encoding if model-specific encoding not found
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    # Count input tokens
+    for message in messages:
+        input_tokens = len(encoding.encode(message["content"]))
+        token_counts["input_tokens"] += input_tokens
+    
+    token_counts["total_tokens"] = token_counts["input_tokens"]
+    logger.debug(f"Input tokens: {token_counts['input_tokens']}")
+    
     if not stream:
         # Non-streaming call
         try:
@@ -143,8 +169,8 @@ def call_llm_api(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                seed=SEED_VALUE,  # Add seed parameter for deterministic output
-                top_p=top_p  # Add top_p parameter for deterministic output
+                seed=SEED_VALUE,
+                top_p=top_p
             )
             result = response.choices[0].message.content
             logger.debug(f"API non-streaming response: {result}")
@@ -152,6 +178,11 @@ def call_llm_api(
             # Extract thinking from non-streaming response too
             thinking_content = ""
             cleaned_response = result
+            
+            # Count output tokens
+            token_counts["output_tokens"] = len(encoding.encode(result))
+            token_counts["total_tokens"] = token_counts["input_tokens"] + token_counts["output_tokens"]
+            logger.info(f"Total tokens used: {token_counts['total_tokens']} (Input: {token_counts['input_tokens']}, Output: {token_counts['output_tokens']})")
             
             # Extract thinking tags and clean response
             if "<think>" in result:
@@ -164,14 +195,14 @@ def call_llm_api(
                 cleaned_response = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
                 logger.debug(f"Extracted thinking content: {thinking_content[:100]}...")
             
-            # Return only the cleaned response without thinking tags
-            return cleaned_response
+            # Return cleaned response and token counts
+            return cleaned_response, token_counts
         except Exception as exc:
             error_msg = f"Error calling LLM API: {exc}"
             logger.error(error_msg)
-            return error_msg
+            return error_msg, token_counts
     else:
-        # Streaming call with thinking tag extraction
+        # Streaming call with thinking tag extraction and token counting
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -179,19 +210,33 @@ def call_llm_api(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-                seed=SEED_VALUE,  # Add seed parameter for deterministic output
-                top_p=top_p  # Add top_p parameter for deterministic output
+                seed=SEED_VALUE,
+                top_p=top_p
             )
             
             full_response = ""
             thinking_content = ""
             in_think = False
             ruminated = False
+            output_tokens = 0
+            
+            # Create a token count display in the UI if a placeholder is provided
+            token_display = st.empty() if thinking_placeholder else None
             
             for chunk in response:
                 if chunk.choices[0].delta.content is not None:
                     token = chunk.choices[0].delta.content
                     full_response += token
+                    
+                    # Count tokens in this chunk
+                    chunk_tokens = len(encoding.encode(token))
+                    output_tokens += chunk_tokens
+                    token_counts["output_tokens"] = output_tokens
+                    token_counts["total_tokens"] = token_counts["input_tokens"] + output_tokens
+                    
+                    # Update token count display
+                    if token_display:
+                        token_display.markdown(f"Tokens used: {token_counts['total_tokens']} (Input: {token_counts['input_tokens']}, Output: {output_tokens})")
                     
                     # Extract thinking tags as they stream
                     if "<think>" in token:
@@ -216,14 +261,15 @@ def call_llm_api(
                             )
             
             logger.debug(f"API streaming response completed, thinking content length: {len(thinking_content)}")
+            logger.info(f"Final token usage: {token_counts}")
             
             # After streaming, extract final reasoning (outside <think>...</think>)
             cleaned = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
-            return thinking_content, cleaned, ruminated
+            return thinking_content, cleaned, ruminated, token_counts
         except Exception as exc:
             error_msg = f"Error in streaming LLM API call: {exc}"
             logger.error(error_msg)
-            return "", error_msg, False
+            return "", error_msg, False, token_counts
 
 # === Helpers ===========================================================
 
@@ -269,12 +315,14 @@ def QueryUnderstandingTool(query: str) -> bool:
     
     logger.debug(f"Calling QueryUnderstandingTool with query: {query}")
     
-    result = call_llm_api(
+    result, token_counts = call_llm_api(
         prompt=prompt,
         system_content=system_content,
         stream=False,
         max_tokens=5
     )
+    
+    logger.debug(f"QueryUnderstandingTool token usage: {token_counts}")
     
     # Extract the response and convert to boolean
     # Strip any whitespace and convert to lowercase for comparison
@@ -379,9 +427,17 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
     thinking_content = ""
     retries = 0
     ruminated_once = False
+    total_tokens_used = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0
+    }
     
     base_prompt = "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal pandas operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis. IMPORTANT: Do not include any import statements in your code. Variables 'pd', 'df', 'px', and 'go' are already available in the execution environment. If you use <think> tags for your reasoning, you MUST always ensure your final response includes a ```python code block OUTSIDE of the thinking tags."
     system_content = get_system_prompt(base_prompt)
+    
+    # Create a token counter display
+    token_counter = st.empty()
     
     while retries <= max_retries:
         # If this is a retry, include the error message or rumination issue in the prompt
@@ -422,7 +478,7 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
         current_thinking_placeholder = thinking_placeholder or st.empty()
         
         # Use streaming API call to show thinking in real-time
-        current_thinking, result, ruminated = call_llm_api(
+        current_thinking, result, ruminated, token_counts = call_llm_api(
             prompt=retry_prompt,
             system_content=system_content,
             stream=True,
@@ -430,6 +486,14 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
             thinking_placeholder=current_thinking_placeholder,
             thinking_title="Code Generation Thinking"
         )
+        
+        # Update total tokens used
+        total_tokens_used["input_tokens"] += token_counts["input_tokens"]
+        total_tokens_used["output_tokens"] += token_counts["output_tokens"]
+        total_tokens_used["total_tokens"] += token_counts["total_tokens"]
+        
+        # Update token counter display
+        token_counter.markdown(f"**Total tokens used**: {total_tokens_used['total_tokens']} (Input: {total_tokens_used['input_tokens']}, Output: {total_tokens_used['output_tokens']})")
         
         # Save the thinking content
         thinking_content = current_thinking
@@ -455,13 +519,13 @@ def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thin
                 continue
             else:
                 # Code executed successfully
-                return code, should_plot, error_msg, thinking_content
+                return code, should_plot, error_msg, thinking_content, total_tokens_used
         
         retries += 1
     
     # If we've reached max retries and still have errors, return the last code anyway
     logger.warning(f"Reached maximum retries ({max_retries}) with errors, returning last generated code")
-    return code, should_plot, error_msg, thinking_content
+    return code, should_plot, error_msg, thinking_content, total_tokens_used
 
 # === ExecutionAgent ====================================================
 
@@ -709,7 +773,7 @@ def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder
     # Use the unified API calling function with streaming
     thinking_placeholder = thinking_placeholder or st.empty()
     
-    thinking_content, cleaned, ruminated = call_llm_api(
+    thinking_content, cleaned, ruminated, token_counts = call_llm_api(
         prompt=prompt,
         system_content=system_content,
         stream=True,
@@ -720,13 +784,14 @@ def ReasoningAgent(query: str, result: Any, code: str = "", thinking_placeholder
     
     logger.info(f"Completed streaming response, thinking content length: {len(thinking_content)}")
     logger.debug(f"Model thinking: {thinking_content}")
+    logger.info(f"Reasoning token usage: {token_counts}")
     
     # Handle rumination case
     if ruminated:
         logger.warning("Rumination detected in reasoning agent, returning truncated explanation")
         cleaned = "The data analysis shows interesting patterns in the results. [Note: Analysis was truncated due to extended processing]"
     
-    return thinking_content, cleaned
+    return thinking_content, cleaned, token_counts
 
 # === DataFrameSummary TOOL (pandas only) =========================================
 def DataFrameSummaryTool(df: pd.DataFrame) -> str:
@@ -768,6 +833,12 @@ def main():
     st.set_page_config(layout="wide")
     if "reasoning_enabled" not in st.session_state:
         st.session_state.reasoning_enabled = True  # Default to enabled
+    if "total_tokens_used" not in st.session_state:
+        st.session_state.total_tokens_used = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        }
 
     # Add CSS for thinking and code sections
     st.markdown("""
@@ -845,6 +916,16 @@ def main():
         margin: 15px 0;
         background-color: #f9f9f9;
     }
+    .token-counter {
+        padding: 8px 12px;
+        background-color: #f2f7ff;
+        border-radius: 6px;
+        border: 1px solid #c7d9f2;
+        font-size: 0.9em;
+        margin: 8px 0;
+        display: flex;
+        justify-content: space-between;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -857,6 +938,16 @@ def main():
         # Add the toggle switch
         reasoning_enabled = st.toggle("Enable Detailed Reasoning", value=st.session_state.reasoning_enabled)
         st.session_state.reasoning_enabled = reasoning_enabled
+        
+        # Display total tokens used across the session
+        st.markdown(
+            f"""<div class="token-counter">
+            <span>Session tokens: <b>{st.session_state.total_tokens_used["total_tokens"]}</b></span>
+            <span>Input: {st.session_state.total_tokens_used["input_tokens"]}</span>
+            <span>Output: {st.session_state.total_tokens_used["output_tokens"]}</span>
+            </div>""", 
+            unsafe_allow_html=True
+        )
         
         file = st.file_uploader("Choose CSV", type=["csv"])
         if file:
@@ -886,6 +977,15 @@ def main():
                     if msg.get("figure") is not None:
                         # Display Plotly figure directly
                         st.plotly_chart(msg["figure"], use_container_width=True)
+                    if msg.get("token_counts") is not None:
+                        st.markdown(
+                            f"""<div class="token-counter">
+                            <span>Tokens: <b>{msg["token_counts"]["total_tokens"]}</b></span>
+                            <span>Input: {msg["token_counts"]["input_tokens"]}</span>
+                            <span>Output: {msg["token_counts"]["output_tokens"]}</span>
+                            </div>""", 
+                            unsafe_allow_html=True
+                        )
 
         if file:  # only allow chat after upload
             if user_q := st.chat_input("Ask about your data…"):
@@ -906,7 +1006,7 @@ def main():
                 
                 with st.spinner("Working …"):
                     # Pass the code thinking placeholder to CodeGenerationAgent
-                    code, should_plot_flag, error_msg, thinking_content = CodeGenerationAgent(
+                    code, should_plot_flag, error_msg, thinking_content, code_token_counts = CodeGenerationAgent(
                         user_q, 
                         st.session_state.df,
                         thinking_placeholder=code_thinking_placeholder
@@ -914,13 +1014,25 @@ def main():
                     result_obj = ExecutionAgent(code, st.session_state.df, should_plot_flag)
                     
                     # Pass the reasoning thinking placeholder to ReasoningAgent
-                    raw_thinking, reasoning_txt = ReasoningAgent(
+                    raw_thinking, reasoning_txt, reasoning_token_counts = ReasoningAgent(
                         user_q, 
                         result_obj, 
                         code,
                         thinking_placeholder=reasoning_thinking_placeholder
                     )
                     reasoning_txt = reasoning_txt.replace("`", "")
+                    
+                    # Combine token counts from code generation and reasoning
+                    total_token_counts = {
+                        "input_tokens": code_token_counts["input_tokens"] + reasoning_token_counts["input_tokens"],
+                        "output_tokens": code_token_counts["output_tokens"] + reasoning_token_counts["output_tokens"],
+                        "total_tokens": code_token_counts["total_tokens"] + reasoning_token_counts["total_tokens"]
+                    }
+                    
+                    # Update session token totals
+                    st.session_state.total_tokens_used["input_tokens"] += total_token_counts["input_tokens"]
+                    st.session_state.total_tokens_used["output_tokens"] += total_token_counts["output_tokens"]
+                    st.session_state.total_tokens_used["total_tokens"] += total_token_counts["total_tokens"]
 
                 # Build assistant response
                 is_plot = 'plotly' in str(type(result_obj))
@@ -1018,7 +1130,8 @@ def main():
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": assistant_msg,
-                    "figure": figure
+                    "figure": figure,
+                    "token_counts": total_token_counts
                 })
                 st.rerun()
 
