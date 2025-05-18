@@ -101,7 +101,8 @@ def call_llm_api(
     thinking_placeholder: Optional[Any] = None,
     model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
     thinking_title: str = "Model Thinking",
-    max_thinking_chars: int = None
+    max_thinking_chars: int = None,
+    top_p: float = 1.0
 ) -> Union[str, Tuple[str, str], Tuple[str, str, bool]]:
     """
     Unified function to call the LLM API with consistent handling of streaming and thinking tags.
@@ -116,6 +117,7 @@ def call_llm_api(
         model: Model to use for inference
         thinking_title: Title to display in the thinking section
         max_thinking_chars: Maximum characters to allow in thinking before detecting rumination
+        top_p: Nucleus sampling parameter (1.0 means no nucleus sampling filter)
         
     Returns:
         If stream=False: Just the response content with thinking tags removed
@@ -141,7 +143,8 @@ def call_llm_api(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                seed=SEED_VALUE  # Add seed parameter for deterministic output
+                seed=SEED_VALUE,  # Add seed parameter for deterministic output
+                top_p=top_p  # Add top_p parameter for deterministic output
             )
             result = response.choices[0].message.content
             logger.debug(f"API non-streaming response: {result}")
@@ -176,7 +179,8 @@ def call_llm_api(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-                seed=SEED_VALUE  # Add seed parameter for deterministic output
+                seed=SEED_VALUE,  # Add seed parameter for deterministic output
+                top_p=top_p  # Add top_p parameter for deterministic output
             )
             
             full_response = ""
