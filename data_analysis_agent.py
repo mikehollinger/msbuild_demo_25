@@ -26,7 +26,7 @@ import sys
 from contextlib import redirect_stdout, redirect_stderr
 import tiktoken  # Add tiktoken for token counting
 import traceback  # Import traceback for error line information
-
+import html
 
 # Load environment variables from .env file
 load_dotenv()
@@ -419,7 +419,7 @@ def CodeWritingTool(cols: List[str], query: str) -> str:
 
 # === CodeGenerationAgent ==============================================
 
-def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 3, thinking_placeholder: Optional[Any] = None):
+def CodeGenerationAgent(query: str, df: pd.DataFrame, max_retries: int = 1, thinking_placeholder: Optional[Any] = None):
     """Selects the appropriate code generation tool and gets code from the LLM for the user's query."""
     logger.info(f"CodeGenerationAgent processing query: {query}")
     should_plot = QueryUnderstandingTool(query)
@@ -874,7 +874,7 @@ def main():
     logger.info("Starting Data Analysis Agent application")
     st.set_page_config(layout="wide")
     if "reasoning_enabled" not in st.session_state:
-        st.session_state.reasoning_enabled = True  # Default to enabled
+        st.session_state.reasoning_enabled = False  # Default to disabled
     if "total_tokens_used" not in st.session_state:
         st.session_state.total_tokens_used = {
             "input_tokens": 0,
@@ -975,7 +975,7 @@ def main():
 
     with left:
         st.header("Data Analysis Agent")
-        st.markdown("<medium>Powered by Azure AI Foundry NVIDIA Llama-3.1-Nemotron-Super-49</a></medium>", unsafe_allow_html=True)
+        st.markdown("<medium>Powered by Azure AI Foundry NVIDIA Llama-3.3-Nemotron-Super-49</a></medium>", unsafe_allow_html=True)
         
         # Add the toggle switch
         reasoning_enabled = st.toggle("Enable Detailed Reasoning", value=st.session_state.reasoning_enabled)
@@ -1015,10 +1015,14 @@ def main():
         with chat_container:
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"], unsafe_allow_html=True)
                     if msg.get("figure") is not None:
                         # Display Plotly figure directly
                         st.plotly_chart(msg["figure"], use_container_width=True)
+                    st.markdown(msg["content"], unsafe_allow_html=True)
+                    if msg.get("code") is not None:
+                        # Use Streamlit's native code display
+                        with st.expander("View code"):
+                            st.code(msg["code"], language="python")
                     if msg.get("token_counts") is not None:
                         st.markdown(
                             f"""<div class="token-counter">
@@ -1123,7 +1127,6 @@ def main():
                     else:
                         # For Series, convert to string representation
                         result_display = result_obj.to_string()
-                    
                     data_result_html = (
                         '<details class="data" open>'
                         '<summary>📊 Data Result</summary>'
@@ -1137,7 +1140,7 @@ def main():
                 # Add retry information if there were retries
                 if error_msg:
                     explanation_html += f"\n\n<small><em>Note: Some code errors were fixed during generation.</em></small>"
-
+                
                 # Code accordion with proper HTML <pre><code> syntax highlighting
                 code_html = (
                     '<details class="code">'
@@ -1166,14 +1169,15 @@ def main():
                 assistant_msg += data_result_html
                 
                 # Add explanation and code
-                assistant_msg += f"{explanation_html}\n\n{code_html}"
+                assistant_msg += f"{explanation_html}"
 
                 logger.debug("Adding assistant response to session state")
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": assistant_msg,
                     "figure": figure,
-                    "token_counts": total_token_counts
+                    "token_counts": total_token_counts,
+                    "code": code  # Store the code separately for rendering with st.code()
                 })
                 st.rerun()
 
