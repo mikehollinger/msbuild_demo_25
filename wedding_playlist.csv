@@ -1,0 +1,45 @@
+guest_id,prioritized_song,donotplay,song_title,artist,energy
+1,FALSE,FALSE,Ghetto Superstar,Pras feat. Mýa & ODB,4
+2,FALSE,FALSE,Yesterday,The Beatles,1
+3,FALSE,FALSE,Vivir Mi Vida,Marc Anthony,5
+4,FALSE,FALSE,One in a Million,Larry Graham,2
+5,FALSE,FALSE,Suavemente,Elvis Crespo,5
+6,FALSE,FALSE,Just Want to Dance with You,George Strait,3
+7,FALSE,FALSE,Dancing Queen,ABBA,4
+8,FALSE,FALSE,Canned Heat,Jamiroquai,5
+9,FALSE,FALSE,Ain't No Stopping Us Now,McFadden & Whitehead,4
+10,FALSE,FALSE,Come Away with Me,Norah Jones,1
+11,FALSE,FALSE,C'mon n' Ride It,Quad City DJ's,4
+12,FALSE,FALSE,The Chicken Dance,Traditional,1
+13,FALSE,FALSE,At Last,Etta James,1
+14,FALSE,FALSE,Party Rock Anthem,LMFAO,5
+15,FALSE,FALSE,Shape of You,Ed Sheeran,4
+16,FALSE,FALSE,Gangnam Style,PSY,5
+17,FALSE,FALSE,Safety Dance,Men Without Hats,4
+18,FALSE,FALSE,Moon River,Andy Williams,1
+19,FALSE,FALSE,Turn Down for What,DJ Snake & Lil Jon,5
+20,FALSE,FALSE,Cheek to Cheek,Ella Fitzgerald & Louis Armstrong,2
+21,FALSE,FALSE,No Excuses,Meghan Trainor,3
+22,FALSE,FALSE,Kiss,Prince,4
+23,FALSE,FALSE,Cake by the Ocean,DNCE,4
+24,TRUE,FALSE,Clair de Lune,Claude Debussy,1
+-1,FALSE,TRUE,The Chicken Dance,Traditional,1
+-1,FALSE,TRUE,Cupid Shuffle,Cupid,3
+-1,FALSE,TRUE,Macarena,Los del Rio,4
+-1,FALSE,TRUE,YMCA,Village People,2
+0,FALSE,FALSE,I'm Yours,Jason Mraz,4
+0,FALSE,FALSE,We Are Young,Fun,4
+0,FALSE,FALSE,Pompeii,Bastille,1
+0,FALSE,FALSE,Somewhere Over the Rainbow,Israel Kamakawiwo'ole,1
+0,FALSE,FALSE,Chasing Cars,Snow Patrol,3
+0,FALSE,FALSE,Marry You,Bruno Mars,3
+0,FALSE,FALSE,Bittersweet Symphony,The Verve,3
+0,FALSE,FALSE,Love Story,Taylor Swift,2
+0,FALSE,FALSE,Here Comes the Sun,The Beatles,5
+0,FALSE,FALSE,Mr Brightside,The Killers,3
+0,FALSE,FALSE,Clocks,Coldplay,5
+0,TRUE,FALSE,Dynamite,Taio Cruz,5
+0,TRUE,FALSE,Shut Up and Dance,Walk The Moon,4
+0,TRUE,FALSE,On Top of the World,Imagine Dragons,3
+0,FALSE,FALSE,"1, 2, 3, 4",Plain White T's,3
+0,FALSE,FALSE,Secrets,OneRepublic,2

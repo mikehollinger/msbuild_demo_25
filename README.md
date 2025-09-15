@@ -57,17 +57,26 @@ Learn more about the model [here](https://developer.nvidia.com/blog/build-enterp
 
 ## Usage
 
-1. Run the Streamlit app:
+1. If desired set environment variables to tune the app's behavior
+   ```
+   export API_URL=https://integrate.api.nvidia.com/v1
+   export NVIDIA_API_KEY=<insert>
+   export LOG_LEVEL=INFO
+   export MAX_THINKING_CHARS=24000
+   export SEED_VALUE=42
+   ```
+
+2. Run the Streamlit app:
    ```bash
    streamlit run data_analysis_agent.py
    ```
 
-2. Download example dataset (optional):
+3. Download example dataset (optional):
    ```bash
    wget https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv
    ```
 
-3. Use the application:
+4. Use the application:
    - Upload a CSV file (e.g., the Titanic dataset)
    - Ask questions in natural language
    - View results, visualizations, and detailed reasoning
